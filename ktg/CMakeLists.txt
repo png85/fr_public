@@ -10,6 +10,10 @@ include(CheckIncludeFiles)
 # check wether the target platform has stdint.h available
 check_include_files(stdint.h HAVE_STDINT_H)
 
+# prepare config.h with platform specific compile-time options
+configure_file(config.h.in config.h)
+include_directories(${CMAKE_BINARY_DIR})
+
 #
 # libOpenKTG: texture generator library
 set(openKTG_SOURCES gentexture.cpp)
