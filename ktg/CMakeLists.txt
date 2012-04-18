@@ -5,6 +5,11 @@ project(OpenKTG)
 
 cmake_minimum_required(VERSION 2.8)
 
+include(CheckIncludeFiles)
+
+# check wether the target platform has stdint.h available
+check_include_files(stdint.h HAVE_STDINT_H)
+
 #
 # libOpenKTG: texture generator library
 set(openKTG_SOURCES gentexture.cpp)
