@@ -16,24 +16,38 @@
 #include <assert.h>
 #include <math.h>
 
+#ifndef NO_CONFIG_H
+#include "config.h"
+#endif // !NO_CONFIG_H
+
+#ifdef HAVE_STDINT_H
+#include <stdint.h>
+#endif // HAVE_STDINT_H
+
 #ifdef _MSC_VER                              // microsoft C++
-
 #pragma warning (disable: 4244)              // conversion from 'a' to 'b', possible loss of data
+#endif 
 
+#ifndef HAVE_STDINT_H
+// no stdint.h available; use custom types
+#ifdef _MSC_VER
 #define sCONFIG_NATIVEINT         int _w64                // sDInt: an int of the same size as a pointer
 #define sCONFIG_INT64             __int64                 // sS64, sU64: a 64 bit int
+#endif
 
+#ifdef __GNUC__
+#define sCONFIG_NATIVEINT         int
+#define sCONFIG_INT64             long long
+#endif
+
+#endif // !HAVE_STDINT_H
+
+#ifdef _MSC_VER
 #define sINLINE                   __forceinline           // use this to inline
-
 #endif
 
 #ifdef __GNUC__                             // GNU C++
-
-#define sCONFIG_NATIVEINT         int
-#define sCONFIG_INT64             long long
-
 #define sINLINE                   __inline__
-
 #endif
 
 /****************************************************************************/
@@ -42,6 +56,18 @@
 /***                                                                      ***/
 /****************************************************************************/
 
+#ifdef HAVE_STDINT_H
+typedef uint8_t                   sU8;
+typedef uint16_t                  sU16;
+typedef uint32_t                  sU32;
+typedef uint64_t                  sU64;
+typedef int8_t                    sS8;
+typedef int16_t                   sS16;
+typedef int32_t                   sS32;
+typedef int64_t                   sS64;
+typedef int                       sInt;
+typedef intptr_t                  sDInt;
+#else
 typedef unsigned char             sU8;      // for packed arrays
 typedef unsigned short            sU16;     // for packed arrays
 typedef unsigned int              sU32;     // for packed arrays and bitfields
@@ -50,11 +76,14 @@ typedef signed char               sS8;      // for packed arrays
 typedef short                     sS16;     // for packed arrays
 typedef int                       sS32;     // for packed arrays
 typedef signed sCONFIG_INT64      sS64;     // use as needed
-typedef float                     sF32;     // basic floatingpoint
-typedef double                    sF64;     // use as needed
 typedef int                       sInt;     // use this most!
 typedef signed sCONFIG_NATIVEINT  sDInt;    // type for pointer diff
+#endif // !HAVE_STDINT_H
+
+typedef float                     sF32;     // basic floatingpoint
+typedef double                    sF64;     // use as needed
 typedef bool                      sBool;    // use for boolean function results
+
 
 /****************************************************************************/
 
