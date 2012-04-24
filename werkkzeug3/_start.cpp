@@ -6147,6 +6147,29 @@ sU8 *sSystem_::LoadFile(const sChar *name)
 
 /****************************************************************************/
 
+
+#if !sINTRO
+//----------------------------------------------------------------------------
+// get base name of current exe
+//----------------------------------------------------------------------------
+void sSystem_::GetModuleBaseName(sChar *buffer,sInt size)
+{
+  // Retrieves the full path for the file that contains the specified module
+  char str[MAX_PATH];
+  GetModuleFileName(NULL, str, MAX_PATH);
+
+  // strip path
+  sCopyString(buffer,sFileFromPathString(str),size);
+
+  // remove extension (if present) to just keep base name
+  sChar *ext = sFileExtensionString(buffer);
+  if (ext)
+    *ext = 0;
+}
+#endif
+
+/****************************************************************************/
+
 sU8 *sSystem_::LoadFileIfNewerThan(const sChar *name,const sChar *other,sInt &size)
 {
   WIN32_FILE_ATTRIBUTE_DATA fa1,fa2;

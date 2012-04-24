@@ -313,6 +313,7 @@ WerkkzeugApp::WerkkzeugApp()
   NovaMode = 0;
   HelpSystemLocation = 0;
   HideSplashScreen = 1;
+  KeyboardLayout = 0;		// default = qwerty;
 
   Status = new sStatusBorder;
   AddBorder(Status);
@@ -1545,7 +1546,10 @@ sBool WerkkzeugApp::SaveConfig()
   *data++ = HideSplashScreen;
   *data++ = HelpSystemLocation;
   *data++ = GenBitmapDefaultFormat;
-  *data++ = 0;
+  *data++ = KeyboardLayout;
+
+  // dummy fields, currently unassigned - so you can add extra flags
+  // without breaking the format or bumping up the version number.
   *data++ = 0;
   *data++ = 0;
   *data++ = 0;
@@ -1671,7 +1675,8 @@ sBool WerkkzeugApp::LoadConfig()
       HideSplashScreen = *data++;
       HelpSystemLocation = *data++;
       GenBitmapDefaultFormat = *data++;
-      data += 4;
+      KeyboardLayout = *data++;
+      data += 3;
 
       if(!GenBitmapDefaultFormat)
         GenBitmapDefaultFormat = sTF_A8R8G8B8;
@@ -2956,6 +2961,14 @@ void WinEditPara::SetApp(WerkkzeugApp *app)
     Grid->AddChild(con);
 
     line++;
+
+    // add qwerty/azerty keyboard layout selection
+    con = new sControl;
+    con->EditCycle(0x111,&App->KeyboardLayout,"Keyboard Layout","QWERTY|AZERTY");
+    con->Style |= sCS_SIDELABEL;
+    con->LabelWidth = lw;
+    con->LayoutInfo.Init(0,line,16,line+1); line++;
+    Grid->AddChild(con);
 
     con = new sControl;
     con->EditCycle(0x111,&GSTitle,"Title Bar","No Title Bar|Title Bar");
