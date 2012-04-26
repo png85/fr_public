@@ -52,6 +52,8 @@ extern "C" sU8 SplashTGA[];
 #define CMD_MENU_SHADOW       0x1015
 #define CMD_MENU_SOUND        0x1016
 #define CMD_MENU_NOVA         0x1017
+#define CMD_MENU_CAMSPEED     0x1018
+#define CMD_MENU_VIEWCONTEXT2 0x1019
 
 #define CMD_BROWSERPREVIEW    0x1060
 #define CMD_LOG_PULLDOWN      0x1061
@@ -164,12 +166,16 @@ WerkkzeugApp::WerkkzeugApp()
   sSystem->ContinuousUpdate(0);
   sSystem->SetResponse(1);
 
+  // add toolborder to main window
   ToolBorder = new sToolBorder;
+  AddBorder(ToolBorder);
 
   ViewWin = new WinView;
-  ViewWin->AddBorder(ToolBorder);
   ViewWin->AddBorder(new sFocusBorder);
   ViewWin->App = this;
+  ViewWin2 = new WinView;
+  ViewWin2->AddBorder(new sFocusBorder);
+  ViewWin2->App = this;
   PageWin = new WinPage;
   PageWin->AddBorder(new sFocusBorder);
   PageWin->App = this;
@@ -259,9 +265,19 @@ WerkkzeugApp::WerkkzeugApp()
   Switch1 = new sSwitchFrame;
   Switch2 = new sSwitchFrame;
   SwitchView = new sSwitchFrame;
+  SwitchView2 = new sSwitchFrame;
   ParaSplit = new sHSplitFrame;
   TopSplit = v0;
 
+  // setup render view toolbars
+  tb = new sToolBorder();
+  tb->AddLabel(".main view");
+  tb->AddContextMenu(CMD_MENU_VIEWCONTEXT);
+  ViewWin->AddBorder(tb);
+  tb = new sToolBorder();
+  tb->AddLabel(".second view");
+  tb->AddContextMenu(CMD_MENU_VIEWCONTEXT2);
+  ViewWin2->AddBorder(tb);
 
   AddChild(h0);
   h0->AddChild(v0);
@@ -269,7 +285,7 @@ WerkkzeugApp::WerkkzeugApp()
   h0->AddChild(v1);
   v0->AddChild(SwitchView);
   v0->AddChild(Switch0);
-  v0->Pos[1] = 800;
+  v0->Pos[1] = 600;
   v1->AddChild(Switch2);
   v1->AddChild(Switch1);
   v1->Pos[1] = 150;
@@ -305,6 +321,7 @@ WerkkzeugApp::WerkkzeugApp()
 
   SwitchView->AddChild(ViewWin);
   SwitchView->AddChild(ViewNovaWin);
+  SwitchView2->AddChild(ViewWin2);
 
   RadioPage = 1;
   RadioTime = 0;
@@ -313,6 +330,7 @@ WerkkzeugApp::WerkkzeugApp()
   NovaMode = 0;
   HelpSystemLocation = 0;
   HideSplashScreen = 1;
+  DualViewMode = 0;
   KeyboardLayout = 0;		// default = qwerty;
 
   Status = new sStatusBorder;
@@ -488,6 +506,7 @@ void WerkkzeugApp::Tag()
   sBroker->Need(OpBrowserWin);
   sBroker->Need(FindResultsWin);
   sBroker->Need(AnimPageWin);
+  sBroker->Need(SwitchView2);
 }
 
 /****************************************************************************/
@@ -642,6 +661,7 @@ sBool WerkkzeugApp::OnShortcut(sU32 key)
 
   case sKEY_PAUSE:
     ViewWin->SetOff();
+    ViewWin2->SetOff();
     ViewNovaWin->SetOff();
     return sTRUE;
   case 'a'|sKEYQ_CTRL:
@@ -760,6 +780,15 @@ sBool WerkkzeugApp::OnCommand(sU32 cmd)
 
   case CMD_MENU_VIEWCONTEXT:
     ViewWin->OnCommand(CMD_VIEW_PULLDOWN);
+    return sTRUE;
+
+  case CMD_MENU_VIEWCONTEXT2:
+    ViewWin2->OnCommand(CMD_VIEW_PULLDOWN);
+    return sTRUE;
+
+  case CMD_MENU_CAMSPEED:
+    // synchronize winview cam speed
+    ViewWin2->CamSpeed = ViewWin->CamSpeed;
     return sTRUE;
 
   case CMD_MENU_PAGE:
@@ -1270,6 +1299,7 @@ void WerkkzeugApp::Clear()
   PageWin->SetPage(Doc->AddPage("start"));
   ParaWin->Reset();
   ViewWin->SetObject(0);
+  ViewWin2->SetObject(0);
   PagelistWin->UpdateList();
   sGui->GarbageCollection();
 }
@@ -1547,10 +1577,10 @@ sBool WerkkzeugApp::SaveConfig()
   *data++ = HelpSystemLocation;
   *data++ = GenBitmapDefaultFormat;
   *data++ = KeyboardLayout;
+  *data++ = DualViewMode;
 
   // dummy fields, currently unassigned - so you can add extra flags
   // without breaking the format or bumping up the version number.
-  *data++ = 0;
   *data++ = 0;
   *data++ = 0;
   
@@ -1623,6 +1653,7 @@ sBool WerkkzeugApp::LoadConfig()
     {
       data++; // ShowCollision
       ViewWin->BitmapZoom = sRange<sInt>(*data++,7,3);
+      ViewWin2->BitmapZoom = ViewWin->BitmapZoom;
       if(*data++) flags |= sGS_SKIN05;
 #ifdef sTEXTUREONLY
       flags |= sGS_SKIN05;
@@ -1647,6 +1678,9 @@ sBool WerkkzeugApp::LoadConfig()
       if(!ViewWin->WireColor[10])  ViewWin->WireColor[10] = 0xff000000;
       if(!ViewWin->WireColor[11])  ViewWin->WireColor[11] = 0xff804040;
       ViewWin->WireColor[12] = 0xff004080;
+
+      // copy color settings to second winview
+      sCopyMem(ViewWin2->WireColor,ViewWin->WireColor,sizeof(ViewWin->WireColor));
     }
     if(version>=4)
     {
@@ -1676,7 +1710,8 @@ sBool WerkkzeugApp::LoadConfig()
       HelpSystemLocation = *data++;
       GenBitmapDefaultFormat = *data++;
       KeyboardLayout = *data++;
-      data += 3;
+      DualViewMode = *data++;
+      data += 2;
 
       if(!GenBitmapDefaultFormat)
         GenBitmapDefaultFormat = sTF_A8R8G8B8;
@@ -1686,6 +1721,13 @@ sBool WerkkzeugApp::LoadConfig()
         ViewWin->WireOptions &= 0x7fffffff;
       else
         ViewWin->WireOptions = EWF_ALL;
+
+      // copy settings to winview2
+      ViewWin2->SelEdge = ViewWin->SelEdge;
+      ViewWin2->SelFace = ViewWin->SelFace;
+      ViewWin2->SelVertex = ViewWin->SelVertex;
+      ViewWin2->WireColor[12] = ViewWin->WireColor[12];
+      ViewWin2->WireOptions = ViewWin->WireOptions;
     }
   }
 
@@ -1706,6 +1748,7 @@ sBool WerkkzeugApp::LoadConfig()
     sGui->Palette[sGC_SELECT]  = ((color[0]&0xfefefe)>>1)+0xff808080;
     sGui->Palette[sGC_SELBACK] = color[2];
     sGui->SetStyle(flags);
+    UpdateDualViewMode();
   }
 
   if(result)
@@ -2145,7 +2188,6 @@ void WerkkzeugApp::InitToolBorder()
   ToolBorder->AddMenu("File",CMD_MENU_FILE);
   ToolBorder->AddMenu("Edit",CMD_MENU_EDIT);
   ToolBorder->AddMenu("Help",CMD_MENU_HELP);
-  ToolBorder->AddContextMenu(CMD_MENU_VIEWCONTEXT,1);
   ToolBorder->AddMenu("   ",0);
 
   if(!TextureMode)
@@ -2187,7 +2229,7 @@ void WerkkzeugApp::InitToolBorder()
     ToolBorder->AddChild(con);
 
     con = new sControl;
-    con->EditChoice(CMD_MENU_SOUND,&ViewWin->CamSpeed,0,"Slow|Normal Speed|Fast|Faster");
+    con->EditChoice(CMD_MENU_CAMSPEED,&ViewWin->CamSpeed,0,"Slow|Normal Speed|Fast|Faster");
   //  con->Style |= sCS_SMALLWIDTH;
     ToolBorder->AddChild(con);
   }
@@ -2941,6 +2983,11 @@ void WinEditPara::SetApp(WerkkzeugApp *app)
     Grid->AddChild(con);
 
     con = new sControl;
+    con->EditCycle(0x116,&App->DualViewMode,0,"|Dual View Mode");
+    con->LayoutInfo.Init(8,4,16,5);
+    Grid->AddChild(con);
+
+    con = new sControl;
     con->EditURGB(0x101,(sInt *)&Color[0],0);
     con->LayoutInfo.Init(0,line,8,line+1); line++;
     Grid->AddChild(con);
@@ -2960,7 +3007,7 @@ void WinEditPara::SetApp(WerkkzeugApp *app)
     con->LayoutInfo.Init(0,line,8,line+1); line++;
     Grid->AddChild(con);
 
-    line++;
+    line += 2;
 
     // add qwerty/azerty keyboard layout selection
     con = new sControl;
@@ -3255,6 +3302,9 @@ sBool WinEditPara::OnCommand(sU32 cmd)
   case 0x100:   // ok
     App->SaveConfig();
     App->PagelistWin->UpdateList();
+    // copy main winview setting to second winview
+    App->ViewWin2->HintSize = App->ViewWin->HintSize;
+    sCopyMem(App->ViewWin2->WireColor, App->ViewWin->WireColor, sizeof(App->ViewWin->WireColor));
     KillMe();
     return sTRUE;
   case 0x101:   // change color
@@ -3305,6 +3355,9 @@ sBool WinEditPara::OnCommand(sU32 cmd)
       sGui->SetStyle(sGui->GetStyle() & ~sGS_SKIN05);
       OnCommand(0x101);
     }
+    return sTRUE;
+  case 0x116: // toggle dual view mode
+    App->UpdateDualViewMode();
     return sTRUE;
   }
   return sFALSE;
@@ -9350,6 +9403,16 @@ void WerkkzeugApp::OpBrowser(sGuiWindow *sendto,sU32 cmd)
   OpBrowserWin->SetPath(OpBrowserPath);
   sGui->AddPopup(OpBrowserWin);
   OpBrowserWin->TreeFocus();
+}
+
+/****************************************************************************/
+
+void WerkkzeugApp::UpdateDualViewMode()
+{
+    TopSplit->RemoveSplit(SwitchView2);
+    if(DualViewMode)
+      TopSplit->SplitChild(1, SwitchView2);
+    TopSplit->Flags |= sGWF_LAYOUT|sGWF_UPDATE;
 }
 
 /****************************************************************************/
