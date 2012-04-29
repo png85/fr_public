@@ -4571,6 +4571,25 @@ sBool sSystem_::InitDI()
     { DIK_F11     ,sKEY_F11         },
     { DIK_F12     ,sKEY_F12         },
 
+    { DIK_NUMPAD0       ,'0'         },
+    { DIK_NUMPAD1       ,'1'         },
+    { DIK_NUMPAD2       ,'2'         },
+    { DIK_NUMPAD3       ,'3'         },
+    { DIK_NUMPAD4       ,'4'         },
+    { DIK_NUMPAD5       ,'5'         },
+    { DIK_NUMPAD6       ,'6'         },
+    { DIK_NUMPAD7       ,'7'         },
+    { DIK_NUMPAD8       ,'8'         },
+    { DIK_NUMPAD9       ,'9'         },
+    { DIK_NUMPADENTER   ,sKEY_ENTER  },
+    { DIK_DECIMAL       ,'.'         },
+    { DIK_NUMPADCOMMA   ,','         },
+    { DIK_DIVIDE        ,'/'         },
+    { DIK_MULTIPLY      ,'*'         },  
+    { DIK_SUBTRACT      ,'-'         },
+    { DIK_ADD           ,'+'         },
+    { DIK_NUMPADEQUALS  ,'='         },
+
     { 0,0 }
   };
 
