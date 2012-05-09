@@ -283,7 +283,13 @@ void MainWindow::MainInit()
 
   ExtendWireRegister();
 
-  sWire->ProcessText(WireTXT,L"werkkzeug4.wire.txt");
+  // if -w shell parameter is set, load external wire.txt else load internal default wire.txt
+  const sChar *wirefilename = sGetShellParameter(L"w",0);
+  if(wirefilename && sCreateFile(wirefilename,sFA_READ) )
+    sWire->ProcessFile(wirefilename);
+  else
+    sWire->ProcessText(WireTXT,L"werkkzeug4.wire.txt");
+
   ExtendWireProcess();
   sWire->ProcessEnd();
 
@@ -1228,7 +1234,7 @@ void MainWindow::CmdNew()
   if(Doc->DocChanged)
     sContinueReallyDialog(sMessage(this,&MainWindow::CmdNew2),sMessage(this,&MainWindow::CmdSaveNew));
   else
-    CmdExit2();
+    CmdNew2();
 }
 
 void MainWindow::CmdNew2()
