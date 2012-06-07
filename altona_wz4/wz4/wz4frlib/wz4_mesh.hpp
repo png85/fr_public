@@ -69,12 +69,32 @@ struct Wz4MeshVertex
 struct Wz4MeshFace
 {
   sInt Cluster;
-  sInt Count;
-  sF32 Select;
+  sU8 Count;          // must be 3 or 4.
+  sU8 Select;
+  sU8 Selected;       // saved selections: bitfield - 1 bit per slot.
+  sU8 _pad;           // explicit padding. (this byte is unused)
   sInt Vertex[4];     // vertices (CCW)
 
   void Init(sInt count);
   void Invert();
+};
+
+struct Wz4MeshSel
+{
+  sU32 Id;            // element ID
+  sF32 Selected;      // selection value
+};
+
+enum Wz4MeshSelMode
+{
+  wMSM_LOAD   = 0x00,
+  wMSM_STORE  = 0x01,
+};
+
+enum Wz4MeshSelType
+{
+  wMST_VERTEX   = 0x00,
+  wMST_FACE     = 0x01,
 };
 
 struct Wz4MeshFaceConnect
@@ -113,6 +133,7 @@ class Wz4Mesh : public wObject
 public:
   sArray<Wz4MeshVertex> Vertices;
   sArray<Wz4MeshFace> Faces;
+  sArray<Wz4MeshSel> SelVertices[8];  // stored vertices selection in slots
   sArray<Wz4MeshCluster *> Clusters;
   Wz4Skeleton *Skeleton;
   sArray<Wz4ChunkPhysics> Chunks; // alternative to skeleton: just unconnected chunks (debris-style)#
@@ -199,6 +220,9 @@ public:
   sBool DivideInChunksR(Wz4MeshFace *mf,sInt mfi,Wz4MeshFaceConnect *conn);
   sVector30 GetFaceNormal(sInt face) const;
   void CalcBBox(sAABBox &box) const;
+
+  // selection
+  void SelStoreLoad(sInt mode, sInt type, sInt slot);
 
   /*** ops ***/
 
