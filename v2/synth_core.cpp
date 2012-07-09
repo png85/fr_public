@@ -31,6 +31,8 @@ static const sF32 fcattackadd = 7.0f;
 static const sF32 fcsusmul    = 0.0019375f;
 static const sF32 fcgain      = 0.6f;
 static const sF32 fcgainh     = 0.6f;
+static const sF32 fcmdlfomul  = 1973915.49f;
+static const sF32 fccpdfalloff = 0.9998f; // @@@BUG this should probably depend on sampling rate.
 
 static const sF32 fcdcoffset  = 3.814697265625e-6f; // 2^-18
 
@@ -47,13 +49,6 @@ union FloatBits
   sF32 f;
   sU32 u;
 };
-
-static sU32 float2bits(sF32 f)
-{
-  FloatBits x;
-  x.f = f;
-  return x.u;
-}
 
 static sF32 bits2float(sU32 u)
 {
@@ -166,13 +161,36 @@ static inline sF32 utof23(sU32 x)
   return f - 1.0f;
 }
 
+// float from [0,1) into 0.32 unsigned fixed-point
+// this loses a bit, but that's what V2 does.
+static inline sU32 ftou32(sF32 v)
+{
+  return 2u * (sInt)(v * fc32bit);
+}
+
+// linear interpolation between a and b using t.
+static inline sF32 lerp(sF32 a, sF32 b, sF32 t)
+{
+  return a + t * (b-a);
+}
+
+template<typename T>
+static inline T max(T a, T b)
+{
+  return a > b ? a : b;
+}
+
 // --------------------------------------------------------------------------
 // Building blocks
 // --------------------------------------------------------------------------
 
-struct StereoSample
+union StereoSample
 {
-  sF32 l, r;
+  struct
+  {
+    sF32 l, r;
+  };
+  sF32 ch[2];
 };
 
 // LRC filter.
@@ -274,6 +292,50 @@ struct V2DCF
   }
 };
 
+// Constant-length delay line
+class V2Delay
+{
+  sU32 pos, len;
+  sF32 *buf;
+
+public:
+  V2Delay()
+    : pos(0), len(0), buf(0)
+  {
+  }
+
+  ~V2Delay()
+  {
+    delete[] buf;
+  }
+
+  void init(sU32 len)
+  {
+    delete[] buf;
+    this->len = len;
+    buf = new sF32[len];
+    reset();
+  }
+
+  void reset()
+  {
+    memset(buf, 0, sizeof(*buf)*len);
+    pos = 0;
+  }
+
+  inline sF32 fetch() const
+  {
+    return buf[pos];
+  }
+
+  inline void feed(sF32 v)
+  {
+    buf[pos] = v;
+    if (++pos == len)
+      pos = 0;
+  }
+};
+
 // --------------------------------------------------------------------------
 // V2 Instance
 // --------------------------------------------------------------------------
@@ -283,6 +345,7 @@ struct V2Instance
   static const int MAX_FRAME_SIZE = 280; // in samples
 
   // Stuff that depends on the sample rate
+  sF32 SRfcsamplesperms;
   sF32 SRfcobasefrq;
   sF32 SRfclinfreq;
   sF32 SRfcBoostCos, SRfcBoostSin;
@@ -294,6 +357,7 @@ struct V2Instance
   // buffers
   sF32 vcebuf[MAX_FRAME_SIZE];
   sF32 vcebuf2[MAX_FRAME_SIZE];
+  StereoSample levelbuf[MAX_FRAME_SIZE]; // original V2 overlaps level buffer with voice buffers
   StereoSample chanbuf[MAX_FRAME_SIZE];
   sF32 aux1buf[MAX_FRAME_SIZE];
   sF32 aux2buf[MAX_FRAME_SIZE];
@@ -305,6 +369,7 @@ struct V2Instance
   {
     sF32 sr = (sF32)samplerate;
 
+    SRfcsamplesperms = sr / 1000.0f;
     SRfcobasefrq = (fcoscbase * fc32bit) / sr;
     SRfclinfreq = fcsrbase / sr;
     SRfcdcfilter = fcdcflt / sr - 1.0f;
@@ -396,7 +461,7 @@ struct V2Osc
     gain = para->gain / 128.0f;
 
     sF32 col = para->color / 128.0f;
-    brpt = 2u * ((sInt)(col * fc32bit));
+    brpt = ftou32(col);
     nfres = 1.0f - sqrtf(col);
   }
 
@@ -1059,7 +1124,7 @@ struct V2LFO
     sync = (sInt)para->sync != 0;
     eg = (sInt)para->egmode != 0;
     freq = (sInt)(0.5f * fc32bit * calcfreq(para->rate / 128.0f));
-    cphase = 2*(sInt)(fc32bit * para->phase / 128.0f);
+    cphase = ftou32(para->phase / 128.0f);
 
     switch ((sInt)para->pol)
     {
@@ -1215,7 +1280,7 @@ struct V2Dist
       break;
 
     case DECIMATOR:
-      dfreq = 2 * (sInt)(fc32bit * calcfreq(para->param1 / 128.0f));
+      dfreq = ftou32(calcfreq(para->param1 / 128.0f));
       break;
 
     default: // filters
@@ -1623,6 +1688,551 @@ private:
     sF32 n = xpose + (sF32)note;
     for (sInt i=0; i < syVV2::NOSC; i++)
       osc[i].note = n;
+  }
+};
+
+// @@@TODO storeV2Values (voice setup/mod matrix!!)
+// but needs fleshed-out V2Instance.
+
+// --------------------------------------------------------------------------
+// Bass boost (fixed low shelving EQ)
+// --------------------------------------------------------------------------
+
+struct syVVBoost
+{
+  sF32 amount;    // boost in dB (0..18)
+};
+
+struct V2Boost
+{
+  bool enabled;
+  sF32 a1, a2;      // normalized filter coeffs
+  sF32 b0, b1, b2;
+  sF32 x1[2];       // state variables
+  sF32 x2[2];
+  sF32 y1[2];
+  sF32 y2[2];
+
+  V2Instance *inst;
+
+  void init(V2Instance *instance)
+  {
+    inst = instance;
+  }
+
+  void set(const syVVBoost *para)
+  {
+    enabled = ((sInt)para->amount) != 0;
+    if (!enabled)
+      return;
+
+    // A = 10^(dBgain/40), or a rough approximation anyway
+    sF32 A = powf(2.0f, para->amount / 128.0f);
+
+    // V2 code computes beta = sqrt((A^2 + 1) - (A-1)^2) for some reason
+    // but applying the binomial formula just gives sqrt(2A)
+    sF32 beta = sqrtf(2.0f * A);
+
+    // temp vars
+    sF32 bs = beta * inst->SRfcBoostSin;
+    sF32 Am1 = A - 1.0f;
+    sF32 Ap1 = A + 1.0f;
+    sF32 cAm1 = Am1 * inst->SRfcBoostCos;
+    sF32 cAp1 = Ap1 * inst->SRfcBoostCos;
+
+    // a0 = (A+1) + (A-1)*cos + beta*sin
+    sF32 ia0 = 1.0f / (Ap1 + cAm1 + bs);
+
+    b1 = 2.0f * A * (Am1 - cAp1) * A * 2.0f * ia0;
+    a1 = -2.0f * (Am1 + cAp1) * ia0;
+    a2 = (Ap1 + cAm1 - bs) * ia0;
+    b0 = A * (Ap1 - cAm1 + bs) * ia0;
+    b2 = A * (Ap1 - cAm1 - bs) * ia0;
+  }
+
+  void render(StereoSample *buf, sInt nsamples)
+  {
+    if (!enabled)
+      return;
+
+    for (sInt ch=0; ch < 2; ch++)
+    {
+      sF32 xm1 = x1[ch], xm2 = x2[ch];
+      sF32 ym1 = y1[ch], ym2 = y2[ch];
+
+      for (sInt i=0; i < nsamples; i++)
+      {
+        sF32 x = buf[i].ch[ch] + fcdcoffset;
+
+        // Second-order IIR filter
+        sF32 y = b0*x + b1*xm1 + b2*xm2 - a1*ym1 - a2*ym2;
+        ym2 = ym1; ym1 = y;
+        xm2 = xm1; xm1 = x;
+
+        buf[i].ch[ch] = y;
+      }
+
+      x1[ch] = xm1; x2[ch] = xm2;
+      y1[ch] = ym1; y2[ch] = ym2;
+    }
+  }
+};
+
+// --------------------------------------------------------------------------
+// Modulating delay
+// --------------------------------------------------------------------------
+
+struct syVModDel
+{
+  sF32 amount;    // dry/wet value (0=-wet, 64=dry, 127=wet)
+  sF32 fb;        // feedback (0=-100%, 64=0%, 127=~100%)
+  sF32 llength;   // length of left delay
+  sF32 rlength;   // length of right delay
+  sF32 mrate;     // modulation rate
+  sF32 mdepth;    // modulation depth
+  sF32 mphase;    // modulation stereo phase (0=-180deg, 64=0deg, 127=180deg)
+};
+
+struct V2ModDel
+{
+  sF32 *db[2];    // left/right delay buffer
+  sU32 dbufmask;  // delay buffer mask (size-1, must be pow2)
+
+  sU32 dbptr;     // buffer write pos
+  sU32 dboffs[2]; // buffer read offset
+  
+  sU32 mcnt;      // mod counter
+  sInt mfreq;     // mod freq
+  sU32 mphase;    // mod phase
+  sU32 mmaxoffs;  // mod max offs (2048samples*depth)
+
+  sF32 fbval;     // feedback val
+  sF32 dryout;
+  sF32 wetout;
+
+  V2Instance *inst;
+
+  void init(V2Instance *instance, sF32 *buf1, sF32 *buf2, sInt buflen)
+  {
+    assert(buflen != 0 && (buflen & (buflen - 1)) != 0);
+    db[0] = buf1;
+    db[1] = buf2;
+    dbufmask = buflen - 1;
+    inst = instance;
+
+    reset();
+  }
+
+  void reset()
+  {
+    dbptr = 0;
+    mcnt = 0;
+
+    memset(db[0], 0, (dbufmask + 1) * sizeof(sF32));
+    memset(db[1], 0, (dbufmask + 1) * sizeof(sF32));
+  }
+
+  void set(const syVModDel *para)
+  {
+    wetout = (para->amount - 64.0f) / 64.0f;
+    dryout = 1.0f - fabsf(wetout);
+    fbval = (para->fb - 64.0f) / 64.0f;
+
+    sF32 lenscale = ((sF32)dbufmask - 1023.0f) / 128.0f;
+    dboffs[0] = (sInt)(para->llength * lenscale);
+    dboffs[1] = (sInt)(para->rlength * lenscale);
+
+    mfreq = (sInt)(inst->SRfclinfreq * fcmdlfomul * calcfreq(para->mrate / 128.0f));
+    mmaxoffs = (sInt)(para->mdepth * 1023.0f / 128.0f);
+    mphase = ftou32((para->mphase - 64.0f) / 128.0f);
+  }
+
+  void renderAux2Main(StereoSample *dest, sInt nsamples)
+  {
+    if (!wetout)
+      return;
+
+    for (sInt i=0; i < nsamples; i++)
+    {
+      StereoSample x;
+
+      sF32 in = inst->aux2buf[i] + fcdcoffset;
+      processSample(&x, in, in, 0.0f);
+
+      dest[i].l += x.l;
+      dest[i].r += x.r;
+    }
+  }
+
+  void renderChan(StereoSample *chanbuf, sInt nsamples)
+  {
+    if (!wetout)
+      return;
+
+    sF32 dry = dryout;
+    for (sInt i=0; i < nsamples; i++)
+      processSample(&chanbuf[i], chanbuf[i].l + fcdcoffset, chanbuf[i].r + fcdcoffset, dry);
+  }
+
+private:
+  inline sF32 processChanSample(sF32 in, sInt ch, sF32 dry)
+  {
+    // modulation is a triangle wave
+    sU32 counter = mcnt + (ch ? mphase : 0);
+    counter = (counter < 0x80000000u) ? counter*2 : 0xffffffffu - counter*2;
+    
+    // determine effective offset
+    sU64 offs32_32 = (sU64)counter * mmaxoffs; // 32.32 fixed point
+    sU32 offs_int = sU32(offs32_32 >> 32) + dboffs[ch];
+    sU32 index = dbptr - offs_int;
+
+    // linear interpolation using low-order bits of offs32_32.
+    sF32 *delaybuf = db[ch];
+    sF32 x = utof23((sU32)(offs32_32 & 0xffffffffu));
+    sF32 delayed = lerp(delaybuf[(index - 0) & dbufmask], delaybuf[(index - 1) & dbufmask], x);
+    
+    // mix and output
+    delaybuf[dbptr] = in + delayed*fbval;
+    return in*dry + delayed*wetout;
+  }
+
+  inline void processSample(StereoSample *out, sF32 l, sF32 r, sF32 dry)
+  {
+    out->l = processChanSample(l, 0, dry);
+    out->r = processChanSample(r, 1, dry);
+
+    // tick
+    mcnt += mfreq;
+    dbptr = (dbptr + 1) & dbufmask;
+  }
+};
+
+// --------------------------------------------------------------------------
+// Stereo Compressor
+// --------------------------------------------------------------------------
+
+struct syVComp
+{
+  sF32 mode;      // 0=off, 1=Peak, 2=RMS
+  sF32 stereo;    // 0=mono, 1=stereo
+  sF32 autogain;  // 0=off, 1=on
+  sF32 lookahead; // lookahead in ms
+  sF32 threshold; // threshold (-54dB .. 6dB)
+  sF32 ratio;     // (0=1:1 .. 127=1:inf)
+  sF32 attack;    // attack value
+  sF32 release;   // release value
+  sF32 outgain;   // output gain
+};
+
+struct V2Comp
+{
+  static const int COMPDLEN = 5700;
+  static const int RMSLEN = 8192; // must be a power of 2
+
+  enum Mode
+  {
+    MODE_OFF = 0,
+    MODE_PEAK,
+    MODE_RMS,
+  };
+
+  enum ModeBits
+  {
+    MODE_BIT_PEAK   = 0,
+    MODE_BIT_RMS    = 1,
+    MODE_BIT_MONO   = 0,
+    MODE_BIT_STEREO = 2,
+    MODE_BIT_ON     = 0,
+    MODE_BIT_OFF    = 4,
+  };
+
+  sInt mode;      // bit 0: Peak/RMS, bit 1: Stereo, bit 2: off
+
+  sF32 invol;     // input gain (1/threshold, internal threshold is always 0dB)
+  sF32 ratio;
+  sF32 outvol;    // output gain (outgain * threshold)
+  sF32 attack;    // attack (lpf coeff, 0..1)
+  sF32 release;   // release (lpf coeff, 0..1)
+
+  sU32 dblen;     // lookahead buffer length
+  sU32 dbcnt;     // lookahead buffer offset
+
+  sF32 curgain[2]; // current gain
+  sF32 peakval[2]; // peak value
+  sF32 rmsval[2];  // rms current value
+  sU32 rmscnt;     // rms counter
+
+  StereoSample dbuf[COMPDLEN]; // lookahead delay buffer
+  StereoSample rmsbuf[RMSLEN]; // RMS ring buffer
+
+  V2Instance *inst;
+
+  void init(V2Instance *instance)
+  {
+    mode = MODE_BIT_STEREO;
+    memset(dbuf, 0, sizeof(dbuf));
+    inst = instance;
+
+    reset();
+  }
+
+  void reset()
+  {
+    for (sInt i=0; i < 2; i++)
+    {
+      peakval[i] = 0.0f;
+      rmsval[i] = 0.0f;
+      curgain[i] = 1.0f;
+    }
+    memset(rmsbuf, 0, sizeof(rmsbuf));
+    rmscnt = 0;
+  }
+
+  void set(const syVComp *para)
+  {
+    sInt oldmode = mode;
+    switch ((sInt)para->mode)
+    {
+    case MODE_OFF:  mode = MODE_BIT_OFF; break;
+    case MODE_PEAK: mode = MODE_BIT_PEAK | MODE_BIT_ON; break;
+    case MODE_RMS:  mode = MODE_BIT_RMS | MODE_BIT_ON; break;
+    default:        assert(false);
+    }
+
+    if (para->stereo != 0.0f)
+      mode |= MODE_BIT_STEREO;
+
+    if (mode != oldmode)
+      reset();
+
+    // @@@BUG: original V2 code uses "fcsamplesperms" here which is
+    // hard-coded to 44.1kHz
+    dblen = (sInt)(para->lookahead * inst->SRfcsamplesperms);
+
+    sF32 thresh = 8.0f * calcfreq(para->threshold / 128.0f);
+    invol = 1.0f / thresh;
+    if (para->autogain != 0.0f)
+      thresh = 1.0f;
+    outvol = thresh * powf(2.0f, (para->outgain - 64.0f) / 16.0f);
+    ratio = para->ratio / 128.0f;
+    
+    // attack: 0 (!) ... 200ms (5Hz)
+    attack = powf(2.0f, -para->attack * 12.0f / 128.0f);
+    // release: 5ms .. 5s
+    release = powf(2.0f, -para->release * 16.0f / 128.0f);
+  }
+
+  void render(StereoSample *buf, sInt nsamples)
+  {
+    if (mode & MODE_BIT_OFF)
+      return;
+
+    // Step 1: level detect (fills LD buffers)
+    StereoSample *levels = inst->levelbuf;
+    switch (mode & (MODE_BIT_RMS | MODE_BIT_STEREO))
+    {
+    case MODE_BIT_PEAK | MODE_BIT_MONO:
+      for (sInt i=0; i < nsamples; i++)
+        levels[i].l = levels[i].r = invol * doPeak(0.5f * (buf[i].l + buf[i].r), 0);
+      break;
+
+    case MODE_BIT_RMS | MODE_BIT_MONO:
+      for (sInt i=0; i < nsamples; i++)
+      {
+        levels[i].l = levels[i].r = invol * doRMS(0.5f * (buf[i].l + buf[i].r), 0);
+        rmscnt = (rmscnt + 1) & (RMSLEN - 1);
+      }
+      break;
+
+    case MODE_BIT_PEAK | MODE_BIT_STEREO:
+      for (sInt i=0; i < nsamples; i++)
+      {
+        levels[i].l = invol * doPeak(buf[i].l, 0);
+        levels[i].r = invol * doPeak(buf[i].r, 1);
+      }
+      break;
+
+    case MODE_BIT_RMS | MODE_BIT_STEREO:
+      for (sInt i=0; i < nsamples; i++)
+      {
+        levels[i].l = invol * doRMS(buf[i].l, 0);
+        levels[i].r = invol * doRMS(buf[i].r, 1);
+        rmscnt = (rmscnt + 1) & (RMSLEN - 1);
+      }
+      break;
+    }
+
+    // Step 2: compress!
+    for (sInt ch=0; ch < 2; ch++)
+    {
+      sF32 gain = curgain[ch];
+      sU32 dbind = dbcnt;
+
+      for (sInt i=0; i < nsamples; i++)
+      {
+        // lookahead delay line
+        sF32 v = outvol * dbuf[dbind].ch[ch];
+        dbuf[dbind].ch[ch] = invol * buf[i].ch[ch];
+        if (++dbind >= dblen)
+          dbind = 0;
+
+        // determine dest gain
+        sF32 dgain = 1.0f;
+        sF32 lvl = levels[i].ch[ch];
+        if (lvl >= 1.0f)
+          dgain = 1.0f / (1.0f + ratio * (lvl - 1.0f));
+
+        // and compress
+        gain += (dgain < gain ? attack : release) * (dgain - gain);
+        buf[i].ch[ch] = v * gain;
+      }
+
+      if (ch == 1)
+        dbcnt = dbind;
+    }
+  }
+  
+private:
+  // level detection variants
+  inline sF32 doPeak(sF32 in, sInt ch)
+  {
+    peakval[ch] = max(peakval[ch] * fccpdfalloff + fcdcoffset, fabsf(in));
+    return peakval[ch];
+  }
+
+  inline sF32 doRMS(sF32 in, sInt ch)
+  {
+    sF32 insq = sqr(in + fcdcoffset);
+    rmsval[ch] += insq - rmsbuf[rmscnt].ch[ch]; // add new sample, remove oldest
+    rmsbuf[rmscnt].ch[ch] = insq; // keep track of value we added
+    return sqrtf(rmsval[ch] / (sF32)RMSLEN);
+  }
+};
+
+// --------------------------------------------------------------------------
+// Stereo reverb
+// --------------------------------------------------------------------------
+
+struct syVReverb
+{
+  sF32 revtime;
+  sF32 highcut;
+  sF32 lowcut;
+  sF32 vol;
+};
+
+struct V2Reverb
+{
+  sF32 gainc[4];  // feedback gain for comb filter delays 0-3
+  sF32 gaina[2];  // feedback gain for allpas delays 0-1
+  sF32 gainin;    // input gain
+  sF32 damp;      // high cut (1-val^2)
+  sF32 lowcut;    // low cut (val^2)
+
+  V2Delay combd[2][4];  // left/right comb filter delay lines
+  sF32 combl[2][4];     // left/right comb delay filter buffers
+  V2Delay alld[2][2];   // left/right allpass filters
+  sF32 hpf[2];          // memory for low cut filters
+
+  V2Instance *inst;
+
+  void init(V2Instance *instance)
+  {
+    static const int lens[2][6] = {
+      { 1309, 1635, 1811, 1926, 220, 74 },
+      { 1327, 1631, 1833, 1901, 205, 77 }
+    };
+
+    for (sInt ch=0; ch < 2; ch++)
+    {
+      // init comb filters
+      for (sInt i=0; i < 4; i++)
+        combd[ch][i].init(lens[ch][i]);
+
+      // init allpass filters
+      for (sInt i=0; i < 2; i++)
+        alld[ch][i].init(lens[ch][4+i]);
+    }
+
+    instance = inst;
+    reset();
+  }
+
+  void reset()
+  {
+    for (sInt ch=0; ch < 2; ch++)
+    {
+      // comb
+      for (sInt i=0; i < 4; i++)
+      {
+        combd[ch][i].reset();
+        combl[ch][i] = 0.0f;
+      }
+
+      // allpass
+      for (sInt i=0; i < 2; i++)
+        alld[ch][i].reset();
+
+      // low cut
+      hpf[ch] = 0.0f;
+    }
+  }
+
+  void set(const syVReverb *para)
+  {
+    static const sF32 gaincdef[4] = {
+      0.966384599f, 0.958186359f, 0.953783929f, 0.950933178f
+    };
+    static const sF32 gainadef[2] = {
+      0.994260075f, 0.998044717f
+    };
+
+    sF32 e = inst->SRfclinfreq * sqr(64.0f / (para->revtime + 1.0f));
+    for (sInt i=0; i < 4; i++)
+      gainc[i] = powf(gaincdef[i], e);
+
+    for (sInt i=0; i < 2; i++)
+      gaina[i] = powf(gainadef[i], e);
+
+    damp = inst->SRfclinfreq * (para->highcut / 128.0f);
+    gainin = para->vol / 128.0f;
+    lowcut = inst->SRfclinfreq * sqr(sqr(para->lowcut / 128.0f));
+  }
+
+  void render(StereoSample *dest, sInt nsamples)
+  {
+    const sF32 *inbuf = inst->aux1buf;
+
+    for (sInt i=0; i < nsamples; i++)
+    {
+      sF32 in = inbuf[i] * gainin + fcdcoffset;
+
+      for (sInt ch=0; ch < 2; ch++)
+      {
+        // parallel comb filters
+        sF32 cur = 0.0f;
+        for (sInt j=0; j < 4; j++)
+        {
+          sF32 nv = in + gainc[j] * combd[ch][j].fetch();
+          combl[ch][j] += damp * (nv - combl[ch][j]);
+          combd[ch][j].feed(combl[ch][j]);
+          cur += combl[ch][j];
+        }
+
+        // serial allpass filters
+        for (sInt j=0; j < 2; j++)
+        {
+          sF32 dv = alld[ch][j].fetch();
+          sF32 dz = cur + gaina[j] * dv;
+          alld[ch][j].feed(dz);
+          cur = dv - dz * gaina[j] * dz;
+        }
+
+        // low cut and output
+        hpf[ch] += lowcut * (cur - hpf[ch]);
+        dest[i].ch[ch] += cur - hpf[ch];
+      }
+    }
   }
 };
 
