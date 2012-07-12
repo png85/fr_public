@@ -1,8 +1,12 @@
 #include "types.h"
+#include "synth.h"
 #include <math.h>
 #include <assert.h>
 #include <string.h>
 #include <stdlib.h>
+
+// TODO:
+// - VU meters?
 
 // --------------------------------------------------------------------------
 // Constants.
@@ -133,6 +137,18 @@ static inline sF32 sqr(sF32 x)
 }
 
 template<typename T>
+static inline T min(T a, T b)
+{
+  return a < b ? a : b;
+}
+
+template<typename T>
+static inline T max(T a, T b)
+{
+  return a > b ? a : b;
+}
+
+template<typename T>
 static inline T clamp(T x, T min, T max)
 {
   return (x < min) ? min : (x > max) ? max : x;
@@ -172,12 +188,6 @@ static inline sU32 ftou32(sF32 v)
 static inline sF32 lerp(sF32 a, sF32 b, sF32 t)
 {
   return a + t * (b-a);
-}
-
-template<typename T>
-static inline T max(T a, T b)
-{
-  return a > b ? a : b;
 }
 
 // --------------------------------------------------------------------------
@@ -304,17 +314,17 @@ public:
   {
   }
 
-  ~V2Delay()
+  void init(sF32 *buf, sU32 len)
   {
-    delete[] buf;
+    this->buf = buf;
+    this->len = len;
+    reset();
   }
 
-  void init(sU32 len)
+  template<sU32 N>
+  void init(sF32 (&buf)[N])
   {
-    delete[] buf;
-    this->len = len;
-    buf = new sF32[len];
-    reset();
+    init(buf, N);
   }
 
   void reset()
@@ -1691,14 +1701,11 @@ private:
   }
 };
 
-// @@@TODO storeV2Values (voice setup/mod matrix!!)
-// but needs fleshed-out V2Instance.
-
 // --------------------------------------------------------------------------
 // Bass boost (fixed low shelving EQ)
 // --------------------------------------------------------------------------
 
-struct syVVBoost
+struct syVBoost
 {
   sF32 amount;    // boost in dB (0..18)
 };
@@ -1720,7 +1727,7 @@ struct V2Boost
     inst = instance;
   }
 
-  void set(const syVVBoost *para)
+  void set(const syVBoost *para)
   {
     enabled = ((sInt)para->amount) != 0;
     if (!enabled)
@@ -2136,23 +2143,35 @@ struct V2Reverb
 
   V2Instance *inst;
 
+  // delay line buffers
+  sF32 bcombl0[1309];
+  sF32 bcombl1[1635];
+  sF32 bcombl2[1811];
+  sF32 bcombl3[1926];
+  sF32 balll0[220];
+  sF32 balll1[74];
+  sF32 bcombr0[1327];
+  sF32 bcombr1[1631];
+  sF32 bcombr2[1833];
+  sF32 bcombr3[1901];
+  sF32 ballr0[205];
+  sF32 ballr1[77];
+
   void init(V2Instance *instance)
   {
-    static const int lens[2][6] = {
-      { 1309, 1635, 1811, 1926, 220, 74 },
-      { 1327, 1631, 1833, 1901, 205, 77 }
-    };
-
-    for (sInt ch=0; ch < 2; ch++)
-    {
-      // init comb filters
-      for (sInt i=0; i < 4; i++)
-        combd[ch][i].init(lens[ch][i]);
-
-      // init allpass filters
-      for (sInt i=0; i < 2; i++)
-        alld[ch][i].init(lens[ch][4+i]);
-    }
+    // init filters
+    combd[0][0].init(bcombl0);
+    combd[0][1].init(bcombl1);
+    combd[0][2].init(bcombl2);
+    combd[0][3].init(bcombl3);
+    alld[0][0].init(balll0);
+    alld[0][1].init(balll1);
+    combd[1][0].init(bcombr0);
+    combd[1][1].init(bcombr1);
+    combd[1][2].init(bcombr2);
+    combd[1][3].init(bcombr3);
+    alld[1][0].init(ballr0);
+    alld[1][1].init(ballr1);
 
     instance = inst;
     reset();
@@ -2213,7 +2232,8 @@ struct V2Reverb
         sF32 cur = 0.0f;
         for (sInt j=0; j < 4; j++)
         {
-          sF32 nv = in + gainc[j] * combd[ch][j].fetch();
+          sF32 dv = combd[ch][j].fetch();
+          sF32 nv = gainc[j] * dv + ((j & 1) ? -in : in); // alternate phase on combs
           combl[ch][j] += damp * (nv - combl[ch][j]);
           combd[ch][j].feed(combl[ch][j]);
           cur += combl[ch][j];
@@ -2225,7 +2245,7 @@ struct V2Reverb
           sF32 dv = alld[ch][j].fetch();
           sF32 dz = cur + gaina[j] * dv;
           alld[ch][j].feed(dz);
-          cur = dv - dz * gaina[j] * dz;
+          cur = dv - gaina[j] * dz;
         }
 
         // low cut and output
@@ -2235,5 +2255,802 @@ struct V2Reverb
     }
   }
 };
+
+// --------------------------------------------------------------------------
+// Channel
+// --------------------------------------------------------------------------
+
+struct syVChan
+{
+  sF32 chanvol;
+  sF32 auxarcv; // aux a receive
+  sF32 auxbrcv; // aux b receive
+  sF32 auxasnd; // aux a send
+  sF32 auxbsnd; // aux b send
+  sF32 aux1;
+  sF32 aux2;
+  sF32 fxroute;
+  syVBoost boost;
+  syVDist dist;
+  syVModDel chorus;
+  syVComp comp;
+};
+
+struct V2Chan
+{
+  enum FXRouting
+  {
+    FXR_DIST_THEN_CHORUS = 0,
+    FXR_CHORUS_THEN_DIST,
+  };
+
+  sF32 chgain;    // channel gain
+  sF32 a1gain;    // aux1 gain
+  sF32 a2gain;    // aux2 gain
+  sF32 aasnd;     // aux a send gain
+  sF32 absnd;     // aux b send gain
+  sF32 aarcv;     // aux a receive gain
+  sF32 abrcv;     // aux b receive gain
+  sInt fxr;
+  V2DCFilter dcf1;
+  V2Boost boost;
+  V2Dist dist;
+  V2DCFilter dcf2;
+  V2ModDel chorus;
+  V2Comp comp;
+
+  V2Instance *inst;
+
+  void init(V2Instance *instance, sF32 *delbuf1, sF32 *delbuf2, sInt buflen)
+  {
+    inst = instance;
+    dcf1.init(inst);
+    boost.init(inst);
+    dist.init(inst);
+    dcf2.init(inst);
+    chorus.init(inst, delbuf1, delbuf2, buflen);
+    comp.init(inst);
+  }
+
+  void set(const syVChan *para)
+  {
+    aarcv = para->auxarcv / 128.0f;
+    abrcv = para->auxbrcv / 128.0f;
+    aasnd = fcgain * (para->auxasnd / 128.0f);
+    absnd = fcgain * (para->auxbsnd / 128.0f);
+    chgain = fcgain * (para->chanvol / 128.0f);
+    a1gain = chgain * fcgainh * (para->aux1 / 128.0f);
+    a2gain = chgain * fcgainh * (para->aux2 / 128.0f);
+    fxr = (sInt)para->fxroute;
+    dist.set(&para->dist);
+    chorus.set(&para->chorus);
+    comp.set(&para->comp);
+    boost.set(&para->boost);
+  }
+
+  void process(sInt nsamples)
+  {
+    StereoSample *chan = inst->chanbuf;
+
+    // AuxA/B receive (stereo)
+    accumulate(chan, inst->auxabuf, nsamples, aarcv);
+    accumulate(chan, inst->auxbbuf, nsamples, abrcv);
+
+    // Filters
+    dcf1.renderStereo(chan, chan, nsamples);
+    comp.render(chan, nsamples);
+    boost.render(chan, nsamples);
+    if (fxr == FXR_DIST_THEN_CHORUS)
+    {
+      dist.renderStereo(chan, chan, nsamples);
+      dcf2.renderStereo(chan, chan, nsamples);
+      chorus.renderChan(chan, nsamples);
+    }
+    else // FXR_CHORUS_THEN_DIST
+    {
+      chorus.renderChan(chan, nsamples);
+      dist.renderStereo(chan, chan, nsamples);
+      dcf2.renderStereo(chan, chan, nsamples);
+    }
+
+    // Aux1/2 send (mono)
+    accumulateMonoMix(inst->aux1buf, chan, nsamples, a1gain);
+    accumulateMonoMix(inst->aux2buf, chan, nsamples, a2gain);
+
+    // AuxA/B send (stereo)
+    accumulate(inst->auxabuf, chan, nsamples, aasnd);
+    accumulate(inst->auxbbuf, chan, nsamples, absnd);
+
+    // Channel buffer to mix buffer (stereo)
+    accumulate(inst->mixbuf, chan, nsamples, chgain);
+  }
+
+private:
+  void accumulate(StereoSample *dest, const StereoSample *src, sInt nsamples, sF32 gain)
+  {
+    if (gain == 0.0f)
+      return;
+
+    for (sInt i=0; i < nsamples; i++)
+    {
+      dest[i].l += gain * src[i].l;
+      dest[i].r += gain * src[i].r;
+    }
+  }
+
+  void accumulateMonoMix(sF32 *dest, const StereoSample *src, sInt nsamples, sF32 gain)
+  {
+    if (gain == 0.0f)
+      return;
+
+    for (sInt i=0; i < nsamples; i++)
+      dest[i] += gain * (src[i].l + src[i].r);
+  }
+};
+
+// --------------------------------------------------------------------------
+// Sound definitions
+// --------------------------------------------------------------------------
+
+struct V2Mod
+{
+  sU8 source;   // source: vel/ctl1-7/aenv/env2/lfo1/lfo2
+  sU8 val;      // 0=-1 .. 128=1
+  sU8 dest;     // destination (index into V2Sound)
+};
+
+struct V2Sound
+{
+  sU8 voice[sizeof(syVV2) / sizeof(sF32)];
+  sU8 chan[sizeof(syVChan) / sizeof(sF32)];
+  sU8 maxpoly;
+  sU8 modnum;
+  V2Mod modmatrix[1]; // actually modnum entries!
+};
+
+// --------------------------------------------------------------------------
+// Ronan
+// --------------------------------------------------------------------------
+
+struct syWRonan
+{
+  sU8 mem[64*1024]; // "that should be enough" --synth.asm. :)
+};
+
+extern "C"
+{
+  void __stdcall ronanCBInit(syWRonan *pthis);
+  void __stdcall ronanCBTick(syWRonan *pthis);
+  void __stdcall ronanCBNoteOn(syWRonan *pthis);
+  void __stdcall ronanCBNoteOff(syWRonan *pthis);
+  void __stdcall ronanCBSetCtl(syWRonan *pthis, sU32 ctl, sU32 val);
+  void __stdcall ronanCBProcess(syWRonan *pthis, sF32 *buf, sU32 len);
+  void __stdcall ronanCBSetSR(syWRonan *pthis, sInt samplerate);
+}
+
+// --------------------------------------------------------------------------
+// Synth
+// --------------------------------------------------------------------------
+
+struct V2ChanInfo
+{
+  sU8 pgm;    // program
+  sU8 ctl[7]; // controllers
+};
+
+// V2Synth holds a V2Instance.
+// In the original code these are one and the same struct (SYN) but that
+// would turn out fairly awkward in this C++ version, hence the split.
+struct V2Synth
+{
+  static const sInt POLY = 64;
+  static const sInt CHANS = 16;
+
+  const V2Sound **patchmap;
+  sU32 mrstat;          // running status in MIDI decoding
+  sU32 curalloc;
+  sInt samplerate;
+  sInt chanmap[POLY];   // voice -> chan
+  sU32 allocpos[POLY];
+  sInt voicemap[CHANS]; // chan -> choice
+  sInt tickd;           // number of finished samples left in mix buffer
+
+  V2ChanInfo chans[CHANS];
+  syVV2 voicesv[POLY];
+  V2Voice voicesw[POLY];
+  syVChan chansv[CHANS];
+  V2Chan chansw[CHANS];
+
+  struct Globals
+  {
+    syVReverb rvbparm;
+    syVModDel delparm;
+    sF32 vlowcut;
+    sF32 vhighcut;
+    syVComp cprparm;
+    sU8 guicolor;
+    sU8 _pad[3];
+  } globals;
+
+  V2Reverb reverb;
+  V2ModDel delay;
+  V2DCFilter dcf;
+  V2Comp compr;
+  sF32 lcfreq;    // low cut freq
+  sF32 lcbuf[2];  // low cut buf l/r
+  sF32 hcfreq;    // high cut freq
+  sF32 hcbuf[2];  // high cut buf l/r
+
+  // delay buffers
+  sF32 maindelbuf[2][32768];
+  sF32 chandelbuf[CHANS][2][2048];
+
+  V2Instance instance;
+
+  syWRonan ronan;
+
+  void init(const void *patchmap, sInt samplerate)
+  {
+    // Ahem, so this is somewhat dubious, but we don't use
+    // virtual functions or anything so it should be fine. Ahem.
+    // Look away please :)
+    memset(this, 0, sizeof(this));
+
+    // set sampling rate
+    this->samplerate = samplerate;
+    instance.calcNewSampleRate(samplerate);
+    ronanCBSetSR(&ronan, samplerate);
+
+    // patch map
+    this->patchmap = (const V2Sound **)patchmap;
+
+    // init voices
+    for (sInt i=0; i < POLY; i++)
+    {
+      chanmap[i] = -1;
+      voicesw[i].init(&instance);
+    }
+
+    // init channels
+    for (sInt i=0; i < CHANS; i++)
+    {
+      chans[i].ctl[6] = 0x7f;
+      chansw[i].init(&instance, chandelbuf[i][0], chandelbuf[i][1], COUNTOF(chandelbuf[i][0]));
+    }
+
+    // global filters
+    reverb.init(&instance);
+    delay.init(&instance, maindelbuf[0], maindelbuf[1], COUNTOF(maindelbuf[0]));
+    ronanCBInit(&ronan);
+    compr.init(&instance);
+    dcf.init(&instance);
+  }
+
+  void render(sF32 *buf, sInt nsamples, sF32 *buf2, bool add)
+  {
+    sInt todo = nsamples;
+
+    // fragment loop - chunk everything into frames.
+    while (todo)
+    {
+      // do we need to render a new frame?
+      if (!tickd)
+        tick();
+
+      // copy to dest buffer(s)
+      const StereoSample *src = &instance.mixbuf[instance.SRcFrameSize - tickd];
+      sInt nread = min(todo, tickd);
+      if (!buf2) // interleaved samples
+      {
+        if (!add)
+          memcpy(buf, src, nsamples * sizeof(StereoSample));
+        else
+        {
+          for (sInt i=0; i < nsamples; i++)
+          {
+            buf[i*2+0] += src[i].l;
+            buf[i*2+1] += src[i].r;
+          }
+        }
+      }
+      else // buf = left, buf2 = right
+      {
+        if (!add)
+        {
+          for (sInt i=0; i < nsamples; i++)
+          {
+            buf[i] = src[i].l;
+            buf2[i] = src[i].r;
+          }
+        }
+        else
+        {
+          for (sInt i=0; i < nsamples; i++)
+          {
+            buf[i] += src[i].l;
+            buf2[i] += src[i].r;
+          }
+        }
+      }
+
+      todo -= nread;
+      tickd -= nread;
+    }
+  }
+
+  void processMIDI(const sU8 *cmd)
+  {
+    while (*cmd != 0xfd) // until end of stream
+    {
+      if (*cmd & 0x80) // start of message
+        mrstat = *cmd++;
+
+      if (mrstat < 0x80) // we don't have a current message? uhm...
+        break;
+
+      sInt chan = mrstat & 0xf;
+      switch ((mrstat >> 4) & 7)
+      {
+      case 1: // Note on
+        if (cmd[1] != 0) // velocity==0 is actually a note off
+        {
+          if (chan == CHANS-1)
+            ronanCBNoteOn(&ronan);
+
+          // calculate current polyphony for this channel
+          const V2Sound *sound = patchmap[chans[chan].pgm];
+          sInt npoly = 0;
+          for (sInt i=0; i < POLY; i++)
+            npoly += (chanmap[i] == chan);
+
+          // voice allocation. this is equivalent to the original V2 code,
+          // but hopefully simpler to follow.
+          sInt usevoice = -1;
+          sInt chanmask, chanfind;
+
+          if (npoly < sound->maxpoly)
+          {
+            // if we haven't reached polyphony limit yet, try to find a free voice
+            // first.
+            for (sInt i=0; i < POLY; i++)
+            {
+              if (chanmap[i] < 0)
+              {
+                usevoice = i;
+                break;
+              }
+            }
+
+            // okay, need to find a free voice. we'll take any channel.
+            chanmask = 0;
+            chanfind = 0;
+          }
+          else
+          {
+            // if we're at polyphony limit, we know there's at least one voice
+            // used by this channel, so we can limit ourselves to killing
+            // voices from our own chan.
+            chanmask = 0xf;
+            chanfind = chan;
+          }
+
+          // don't have a voice yet? kill oldest eligible one with gate off.
+          if (usevoice < 0)
+          {
+            sU32 oldest = curalloc;
+            for (sInt i=0; i < POLY; i++)
+            {
+              if ((chanmap[i] & chanmask) == chanfind && !voicesw[i].gate && allocpos[i] < oldest)
+              {
+                oldest = allocpos[i];
+                usevoice = i;
+              }
+            }
+          }
+
+          // still no voice? okay, just take the oldest one we can find, period.
+          if (usevoice < 0)
+          {
+            sU32 oldest = curalloc;
+            for (sInt i=0; i < POLY; i++)
+            {
+              if ((chanmap[i] & chanmask) == chanfind && allocpos[i] < oldest)
+              {
+                oldest = allocpos[i];
+                usevoice = i;
+              }
+            }
+          }
+
+          // we have our voice - assign it!
+          chanmap[usevoice] = chan;
+          voicemap[chan] = usevoice;
+          allocpos[usevoice] = curalloc++;
+
+          // and note on!
+          storeV2Values(usevoice);
+          voicesw[usevoice].noteOn(cmd[0], cmd[1]);
+          cmd += 2;
+          break;
+        }
+        // fall-through (for when we had a note off)
+
+      case 0: // Note off
+        if (chan == CHANS-1)
+          ronanCBNoteOff(&ronan);
+
+        for (sInt i=0; i < POLY; i++)
+        {
+          if (chanmap[i] != chan)
+            continue;
+
+          V2Voice *voice = &voicesw[i];
+          if (voice->note == cmd[0] && voice->gate)
+            voice->noteOff();
+        }
+        cmd += 2;
+        break;
+
+      case 2: // Aftertouch
+        cmd++; // ignored
+        break;
+
+      case 3: // Control change
+        {
+          sInt ctrl = cmd[0];
+          sU8 val = cmd[1];
+          if (ctrl >= 1 && ctrl <= 7)
+          {
+            chans[chan].ctl[ctrl - 1] = val;
+            if (chan == CHANS-1)
+              ronanCBSetCtl(&ronan, ctrl, val);
+          }
+          else if (ctrl == 120) // CC #120: all sound off
+          {
+            for (sInt i=0; i < POLY; i++)
+            {
+              if (chanmap[i] != chan)
+                continue;
+
+              voicesw[i].init(&instance);
+              chanmap[i] = -1;
+            }
+          }
+          else if (ctrl == 123) // CC #123: all notes off
+          {
+            if (chan == CHANS-1)
+              ronanCBNoteOff(&ronan);
+
+            for (sInt i=0; i < POLY; i++)
+            {
+              if (chanmap[i] == chan)
+                voicesw[i].noteOff();
+            }
+          }
+        }
+        cmd += 2;
+        break;
+
+      case 4: // Program change
+        {
+          sU8 pgm = *cmd++ & 0x7f;
+          // did the program actually change?
+          if (chans[chan].pgm != pgm)
+          {
+            chans[chan].pgm = pgm;
+
+            // need to turn all voices on this channel off.
+            for (sInt i=0; i < POLY; i++)
+            {
+              if (chanmap[i] == chan)
+                chanmap[i] = -1;
+            }
+          }
+
+          // either way, reset controllers
+          for (sInt i=0; i < 6; i++)
+            chans[chan].ctl[i] = 0;
+        }
+        break;
+
+      case 5: // Pitch bend
+        cmd += 2; // ignored
+        break;
+
+      case 6: // Poly Aftertouch
+        cmd += 2; // ignored
+        break;
+
+      case 7: // System
+        if (chan == 0xf) // Reset
+          init(patchmap, samplerate);
+        break; // rest ignored
+      }
+    }
+  }
+
+  void setGlobals(const sU8 *para)
+  {
+    // copy over
+    sF32 *globf = (sF32 *)&globals;
+    for (sInt i=0; i < sizeof(globals)/sizeof(sF32); i++)
+      globf[i] = para[i];
+
+    // set
+    reverb.set(&globals.rvbparm);
+    delay.set(&globals.delparm);
+    compr.set(&globals.cprparm);
+    lcfreq = sqr((globals.vlowcut + 1.0f) / 128.0f);
+    hcfreq = sqr((globals.vhighcut + 1.0f) / 128.0f);
+  }
+
+  void getPoly(sInt *dest)
+  {
+    for (sInt i=0; i <= CHANS; i++)
+      dest[i] = 0;
+
+    for (sInt i=0; i < POLY; i++)
+    {
+      sInt chan = chanmap[i];
+      if (chan < 0)
+        continue;
+
+      dest[chan]++;
+      dest[CHANS]++;
+    }
+  }
+
+  void getPgm(sInt *dest)
+  {
+    for (sInt i=0; i < CHANS; i++)
+      dest[i] = chans[i].pgm;
+  }
+
+private:
+  sF32 getmodsource(const V2Voice *voice, sInt chan, sInt source)
+  {
+    sF32 in = 0.0f;
+
+    switch (source)
+    {
+    case 0: in = voice->velo; break;        // velocity
+    case 1: case 2: case 3: case 4: case 5: case 6: case 7: // controller value
+      in = chans[chan].ctl[source-1];
+      break;
+    case 8: in = voice->env[0].out; break;  // EG1 output
+    case 9: in = voice->env[1].out; break;  // EG2 output
+    case 10: in = voice->lfo[0].out; break; // LFO1 output
+    case 11: in = voice->lfo[1].out; break; // LFO2 output
+    default: in = 2.0f * (voice->note - 48.0f); break; // note
+    }
+
+    return in;
+  }
+
+  void storeV2Values(sInt vind)
+  {
+    sInt chan = chanmap[vind];
+    if (chan < 0)
+      return;
+
+    // get patch definition
+    const V2Sound *patch = patchmap[chans[chan].pgm];
+
+    // voice data
+    syVV2 *vpara = &voicesv[vind];
+    sF32 *vparaf = (sF32 *)vpara;
+    V2Voice *voice = &voicesw[vind];
+    
+    // copy voice dependent data
+    for (sInt i=0; i < COUNTOF(patch->voice); i++)
+      vparaf[i] = (sF32)patch->voice[i];
+
+    // modulation matrix
+    for (sInt i=0; i < patch->modnum; i++)
+    {
+      const V2Mod *mod = &patch->modmatrix[i];
+      if (mod->dest >= COUNTOF(patch->voice))
+        continue;
+
+      sF32 scale = (mod->val - 64.0f) / 64.0f;
+      vparaf[mod->dest] = clamp(vparaf[mod->dest] + scale*getmodsource(voice, chan, mod->source), 0.0f, 128.0f);
+    }
+
+    voice->set(vpara);
+  }
+
+  void storeChanValues(sInt chan)
+  {
+    // get patch definition
+    const V2Sound *patch = patchmap[chans[chan].pgm];
+
+    // chan data
+    syVChan *cpara = &chansv[chan];
+    sF32 *cparaf = (sF32 *)cpara;
+    V2Chan *cwork = &chansw[chan];
+    V2Voice *voice = &voicesw[voicemap[chan]];
+
+    // copy channel dependent data
+    for (sInt i=0; i < COUNTOF(patch->chan); i++)
+      cparaf[i] = (sF32)patch->chan[i];
+
+    // modulation matrix
+    for (sInt i=0; i < patch->modnum; i++)
+    {
+      const V2Mod *mod = &patch->modmatrix[i];
+      sInt dest = mod->dest - COUNTOF(patch->voice);
+      if (dest < 0 || dest >= COUNTOF(patch->chan))
+        continue;
+
+      sF32 scale = (mod->val - 64.0f) / 64.0f;
+      cparaf[dest] = clamp(cparaf[dest] + scale*getmodsource(voice, chan, mod->source), 0.0f, 128.0f);
+    }
+
+    cwork->set(cpara);
+  }
+
+  void tick()
+  {
+    // voices
+    for (sInt i=0; i < POLY; i++)
+    {
+      if (chanmap[i] < 0)
+        continue;
+
+      storeV2Values(i);
+      voicesw[i].tick();
+
+      // if EG1 finished, turn off voice
+      if (voicesw[i].env[0].state == V2Env::OFF)
+        chanmap[i] = -1;
+    }
+
+    // chans
+    for (sInt i=0; i < CHANS; i++)
+      storeChanValues(i);
+
+    ronanCBTick(&ronan);
+    tickd = instance.SRcFrameSize;
+    renderFrame();
+  }
+
+  void renderFrame()
+  {
+    sInt nsamples = instance.SRcFrameSize;
+
+    // clear output buffer
+    memset(instance.mixbuf, 0, nsamples * sizeof(StereoSample));
+
+    // clear aux buffers
+    memset(instance.aux1buf, 0, nsamples * sizeof(sF32));
+    memset(instance.aux2buf, 0, nsamples * sizeof(sF32));
+    memset(instance.auxabuf, 0, nsamples * sizeof(StereoSample));
+    memset(instance.auxbbuf, 0, nsamples * sizeof(StereoSample));
+
+    // process all channels
+    for (sInt chan=0; chan < CHANS; chan++)
+    {
+      // check if any voices are active on this channel
+      sInt voice = 0;
+      while (voice < POLY && chanmap[voice] != chan)
+        voice++;
+
+      if (voice == POLY)
+        continue;
+
+      // clear channel buffer
+      memset(instance.chanbuf, 0, nsamples * sizeof(StereoSample));
+
+      // render all voices on this channel
+      for (; voice < POLY; voice++)
+      {
+        if (chanmap[voice] != chan)
+          continue;
+
+        voicesw[voice].render(instance.chanbuf, nsamples);
+      }
+
+      // channel 15 -> Ronan
+      if (chan == CHANS-1)
+        ronanCBProcess(&ronan, &instance.chanbuf[0].l, nsamples);
+
+      chansw[chan].process(nsamples); 
+    }
+
+    // global filters
+    StereoSample *mix = instance.mixbuf;
+    reverb.render(mix, nsamples);
+    delay.renderAux2Main(mix, nsamples);
+    dcf.renderStereo(mix, mix, nsamples);
+
+    // low cut/high cut
+    sF32 lcf = lcfreq, hcf = hcfreq;
+    for (sInt i=0; i < nsamples; i++)
+    {
+      for (sInt ch=0; ch < 2; ch++)
+      {
+        // low cut
+        sF32 x = mix[i].ch[ch] - lcbuf[ch];
+        lcbuf[ch] += lcf * x;
+
+        // high cut
+        if (hcf != 1.0f)
+        {
+          hcbuf[ch] += hcf * (x - hcbuf[ch]);
+          x = hcbuf[ch];
+        }
+
+        mix[i].ch[ch] = x;
+      }
+    }
+
+    // sum compressor
+    compr.render(mix, nsamples);
+  }
+};
+
+// --------------------------------------------------------------------------
+// C-style interface
+// --------------------------------------------------------------------------
+
+unsigned int __stdcall synthGetSize()
+{
+  return sizeof(V2Synth);
+}
+
+void __stdcall synthInit(void *pthis, const void *patchmap, int samplerate)
+{
+  ((V2Synth *)pthis)->init(patchmap, samplerate);
+}
+
+void __stdcall synthRender(void *pthis, void *buf, int smp, void *buf2, int add)
+{
+  ((V2Synth *)pthis)->render((sF32 *)buf, smp, (sF32 *)buf2, add != 0);
+}
+
+void __stdcall synthProcessMIDI(void *pthis, const void *ptr)
+{
+  ((V2Synth *)pthis)->processMIDI((const sU8 *)ptr);
+}
+
+void __stdcall synthSetGlobals(void *pthis, const void *ptr)
+{
+  ((V2Synth *)pthis)->setGlobals((const sU8 *)ptr);
+}
+
+void __stdcall synthGetPoly(void *pthis, void *dest)
+{
+  ((V2Synth *)pthis)->getPoly((sInt*)dest);
+}
+
+void __stdcall synthGetPgm(void *pthis, void *dest)
+{
+  ((V2Synth *)pthis)->getPgm((sInt*)dest);
+}
+
+void __stdcall synthSetVUMode(void *, int)
+{
+  // nyi
+}
+
+void __stdcall synthGetChannelVU(void *, int, float *, float *)
+{
+  // nyi
+}
+
+void __stdcall synthGetMainVU(void *, float *, float *)
+{
+  // nyi
+}
+
+long __stdcall synthGetFrameSize(void *pthis)
+{
+  return ((V2Synth *)pthis)->instance.SRcFrameSize;
+}
+
+extern "C" void * __stdcall synthGetSpeechMem(void *pthis)
+{
+  return &((V2Synth *)pthis)->ronan;
+}
 
 // vim: sw=2:sts=2:et:cino=\:0l1g0(0
