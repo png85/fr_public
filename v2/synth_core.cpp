@@ -5,6 +5,28 @@
 #include <string.h>
 #include <stdlib.h>
 
+#define DEBUGSCOPES 0
+
+#if DEBUGSCOPES
+#include "scope.h"
+#define DEBUG_PLOT_OPEN(which, title, rate, w, h) scopeOpen((which), (title), (rate), (w), (h))
+#define DEBUG_PLOT_VAL(which, value) do { float t=value; scopeSubmit((which), &t, 1); } while(0)
+#define DEBUG_PLOT(which, data, nsamples) scopeSubmit((which), (data), (nsamples))
+#define DEBUG_PLOT_STRIDED(which, data, stride, nsamples) scopeSubmitStrided((which), (data), (stride), (nsamples))
+#define DEBUG_PLOT_UPDATE() scopeUpdateAll()
+#else
+#define DEBUG_PLOT_OPEN(which, title, rate, w, h)
+#define DEBUG_PLOT_VAL(which, value)
+#define DEBUG_PLOT(which, data, nsamples)
+#define DEBUG_PLOT_STRIDED(which, data, stride, nsamples)
+#define DEBUG_PLOT_UPDATE()
+#endif
+
+#define DEBUG_PLOT_CHAN(which, ch) ((unsigned char *)(which)+(ch))
+#define DEBUG_PLOT_STEREO(which, data, nsamples) \
+  DEBUG_PLOT_STRIDED(DEBUG_PLOT_CHAN(which, 0), &(data)->l, 2, (nsamples)); \
+  DEBUG_PLOT_STRIDED(DEBUG_PLOT_CHAN(which, 1), &(data)->r, 2, (nsamples))
+
 // TODO:
 // - VU meters?
 
@@ -28,7 +50,6 @@ static const sF32 fcframebase = 128.0f;       // size of a frame in samples
 static const sF32 fcdcflt     = 126.0f;
 static const sF32 fccfframe   = 11.0f;
 
-static const sF32 fcOscPitchOffs = 60.0f;
 static const sF32 fcfmmax     = 2.0f;
 static const sF32 fcattackmul = -0.09375f; // -0.0859375
 static const sF32 fcattackadd = 7.0f;
@@ -295,7 +316,7 @@ struct V2DCF
   sF32 step(sF32 in, sF32 R)
   {
     // y(n) = x(n) - x(n-1) + R*y(n-1)
-    sF32 y = R*ym1 - xm1 + in;
+    sF32 y = (fcdcoffset + R*ym1 - xm1 + in) - fcdcoffset;
     xm1 = in;
     ym1 = y;
     return y;
@@ -394,7 +415,7 @@ struct V2Instance
     SRfcsamplesperms = sr / 1000.0f;
     SRfcobasefrq = (fcoscbase * fc32bit) / sr;
     SRfclinfreq = fcsrbase / sr;
-    SRfcdcfilter = fcdcflt / sr - 1.0f;
+    SRfcdcfilter = 1.0f - fcdcflt / sr;
 
     // frame size
     SRcFrameSize = (sInt)(fcframebase * sr / fcsrbase + 0.5f);
@@ -470,7 +491,7 @@ struct V2Osc
   void chgPitch()
   {
     nffrq = inst->SRfclinfreq * calcfreq((pitch + 64.0f) / 128.0f);
-    freq = (sInt)(inst->SRfcobasefrq * pow(2.0f, (pitch + note - fcOscPitchOffs) / 12.0f));
+    freq = (sInt)(inst->SRfcobasefrq * pow(2.0f, (pitch + note - 60.0f) / 12.0f));
   }
 
   void set(const syVOsc *para)
@@ -500,6 +521,8 @@ struct V2Osc
     case OSC_AUXA:    renderAux(dest, inst->auxabuf, nsamples); break;
     case OSC_AUXB:    renderAux(dest, inst->auxbbuf, nsamples); break; 
     }
+
+    DEBUG_PLOT(this, dest, nsamples);
   }
 
 private:
@@ -673,7 +696,7 @@ private:
         break;
 
       case OSMTC_DOWN_UP_DOWN: // case f)
-        y = rcpf * (gain - c2*omf*(p + p + omf));
+        y = -rcpf * (gain + c2*omf*(p + p + omf));
         break;
 
       // INVALID CASES
@@ -939,6 +962,7 @@ struct V2Env
     }
 
     out = val * gain;
+    DEBUG_PLOT_VAL(this, out / 128.0f);
   }
 };
 
@@ -1093,6 +1117,8 @@ struct V2Flt
       moog = m;
       break;
     }
+
+    DEBUG_PLOT_STRIDED(this, dest, step, nsamples);
   }
 };
 
@@ -1215,6 +1241,8 @@ struct V2LFO
     cntr += freq;
     if (cntr < (sU32)freq && eg) // in one-shot mode, clamp at wrap-around
       cntr = ~0u;
+
+    DEBUG_PLOT_VAL(this, out);
   }
 };
 
@@ -1354,6 +1382,8 @@ struct V2Dist
       fltl.render(dest, src, nsamples);
       break;
     }
+
+    DEBUG_PLOT(this, dest, nsamples);
   }
 
   void renderStereo(StereoSample *dest, const StereoSample *src, sInt nsamples)
@@ -1385,6 +1415,8 @@ struct V2Dist
       // mono version.
       renderMono(&dest[0].l, &src[0].l, nsamples*2);
     }
+
+    DEBUG_PLOT_STEREO(this, dest, nsamples);
   }
 
 private:
@@ -1552,6 +1584,7 @@ struct V2Voice
 
     // volume ramping slope
     volramp = (env[0].out / 128.0f - curvol) * inst->SRfciframe;
+    DEBUG_PLOT_VAL(&curvol, curvol);
   }
 
   void render(StereoSample *dest, sInt nsamples)
@@ -1593,6 +1626,8 @@ struct V2Voice
 
     // voice buffer -> dc filter -> voice buffer
     dcf.renderMono(voice, voice, nsamples);
+
+    DEBUG_PLOT(this, voice, nsamples);
 
     // voice buffer (mono) -> +=output buffer (stereo)
     // original ASM code has chan buffer hardwired as output here
@@ -2375,6 +2410,8 @@ struct V2Chan
 
     // Channel buffer to mix buffer (stereo)
     accumulate(inst->mixbuf, chan, nsamples, chgain);
+
+    DEBUG_PLOT_STEREO(this, inst->mixbuf, nsamples);
   }
 
 private:
@@ -2420,6 +2457,12 @@ struct V2Sound
   V2Mod modmatrix[1]; // actually modnum entries!
 };
 
+union V2PatchMap
+{
+  sU32 offsets[128];    // offsets into raw_data[]
+  sU8 raw_data[1];      // variable size
+};
+
 // --------------------------------------------------------------------------
 // Ronan
 // --------------------------------------------------------------------------
@@ -2458,7 +2501,7 @@ struct V2Synth
   static const sInt POLY = 64;
   static const sInt CHANS = 16;
 
-  const V2Sound **patchmap;
+  const V2PatchMap *patchmap;
   sU32 mrstat;          // running status in MIDI decoding
   sU32 curalloc;
   sInt samplerate;
@@ -2516,7 +2559,7 @@ struct V2Synth
     ronanCBSetSR(&ronan, samplerate);
 
     // patch map
-    this->patchmap = (const V2Sound **)patchmap;
+    this->patchmap = (const V2PatchMap*)patchmap;
 
     // init voices
     for (sInt i=0; i < POLY; i++)
@@ -2538,6 +2581,22 @@ struct V2Synth
     ronanCBInit(&ronan);
     compr.init(&instance);
     dcf.init(&instance);
+
+    // debug plots (uncomment the ones you want)
+    sInt sr_plot = 48000/10; // plot rate
+    sInt sr_lfo = 800;
+    sInt w = 800, h = 150;
+
+    DEBUG_PLOT_OPEN(&voicesw[0].osc[0], "Voice 0 VCO 0", sr_plot, w, h);
+    //DEBUG_PLOT_OPEN(&voicesw[0].osc[1], "Voice 0 VCO 1", sr_plot, w, h);
+    //DEBUG_PLOT_OPEN(&voicesw[0].vcf[0], "Voice 0 VCF 0", sr_plot, w, h);
+    //DEBUG_PLOT_OPEN(&voicesw[0].env[0], "Voice 0 Env 0", sr_lfo, w, h);
+    DEBUG_PLOT_OPEN(&voicesw[0].dist, "Voice 0 Dist", sr_plot, w, h);
+    DEBUG_PLOT_OPEN(&voicesw[0], "Voice 0 final", sr_plot, w, h);
+    //DEBUG_PLOT_OPEN(DEBUG_PLOT_CHAN(&chansw[0], 0), "Channel 0 L", sr_plot, w, h);
+    //DEBUG_PLOT_OPEN(DEBUG_PLOT_CHAN(&chansw[0], 1), "Channel 0 R", sr_plot, w, h);
+    //DEBUG_PLOT_OPEN(DEBUG_PLOT_CHAN(&instance.mixbuf, 0), "Mix L", sr_plot, w, h);
+    //DEBUG_PLOT_OPEN(DEBUG_PLOT_CHAN(&instance.mixbuf, 1), "Mix R", sr_plot, w, h);
 
     initialized = true;
   }
@@ -2597,6 +2656,8 @@ struct V2Synth
       todo -= nread;
       tickd -= nread;
     }
+
+    DEBUG_PLOT_UPDATE();
   }
 
   void processMIDI(const sU8 *cmd)
@@ -2619,7 +2680,7 @@ struct V2Synth
             ronanCBNoteOn(&ronan);
 
           // calculate current polyphony for this channel
-          const V2Sound *sound = patchmap[chans[chan].pgm];
+          const V2Sound *sound = getpatch(chans[chan].pgm);
           sInt npoly = 0;
           for (sInt i=0; i < POLY; i++)
             npoly += (chanmap[i] == chan);
@@ -2629,7 +2690,7 @@ struct V2Synth
           sInt usevoice = -1;
           sInt chanmask, chanfind;
 
-          if (npoly < sound->maxpoly)
+          if (!npoly || npoly < sound->maxpoly) // even if maxpoly is 0, allow at least 1.
           {
             // if we haven't reached polyphony limit yet, try to find a free voice
             // first.
@@ -2684,6 +2745,7 @@ struct V2Synth
           }
 
           // we have our voice - assign it!
+          assert(usevoice >= 0);
           chanmap[usevoice] = chan;
           voicemap[chan] = usevoice;
           allocpos[usevoice] = curalloc++;
@@ -2831,7 +2893,13 @@ struct V2Synth
   }
 
 private:
-  sF32 getmodsource(const V2Voice *voice, sInt chan, sInt source)
+  const V2Sound *getpatch(sInt pgm) const
+  {
+    assert(pgm >= 0 && pgm < 128);
+    return (const V2Sound *)&patchmap->raw_data[patchmap->offsets[pgm]];
+  }
+
+  sF32 getmodsource(const V2Voice *voice, sInt chan, sInt source) const
   {
     sF32 in = 0.0f;
 
@@ -2858,7 +2926,7 @@ private:
       return;
 
     // get patch definition
-    const V2Sound *patch = patchmap[chans[chan].pgm];
+    const V2Sound *patch = getpatch(chans[chan].pgm);
 
     // voice data
     syVV2 *vpara = &voicesv[vind];
@@ -2886,7 +2954,7 @@ private:
   void storeChanValues(sInt chan)
   {
     // get patch definition
-    const V2Sound *patch = patchmap[chans[chan].pgm];
+    const V2Sound *patch = getpatch(chans[chan].pgm);
 
     // chan data
     syVChan *cpara = &chansv[chan];
@@ -3010,6 +3078,8 @@ private:
 
     // sum compressor
     compr.render(mix, nsamples);
+
+    DEBUG_PLOT_STEREO(mix, mix, nsamples);
   }
 };
 
