@@ -211,7 +211,7 @@ void RNPrint::Render(Wz4RenderContext *ctx)
 RNRibbons::RNRibbons()
 {
   Geo = new sGeometry;
-  Geo->Init(sGF_TRILIST|sGF_INDEX32,sVertexFormatStandard);
+  Geo->Init(sGF_TRILIST|sGF_INDEX32,sVertexFormatTangent);
   Mtrl = new sSimpleMaterial;
   Mtrl->Flags = sMTRL_CULLOFF|sMTRL_ZON|sMTRL_LIGHTING;
   Mtrl->Prepare(sVertexFormatStandard);
@@ -244,7 +244,7 @@ void RNRibbons::Prepare(Wz4RenderContext *ctx)
   sMatrix34 mat;
   sF32 rx,ry,rz;
   sVector31 p;
-  sVertexStandard *vp;
+  sVertexTangent  *vp;
 
   sInt max = Para.Steps;
   const sF32 scale = 0.001f;
@@ -270,8 +270,14 @@ void RNRibbons::Prepare(Wz4RenderContext *ctx)
 
       p += mat.k * Para.Forward;
       vp->Init(p-mat.i*Para.Side,-mat.j,0.0f,i+(1/Para.Steps));
+      vp->tx = vp->nx * (vp->nx * p.x);
+      vp->ty = vp->ny * (vp->ny * p.y);
+      vp->tz = vp->nz * (vp->nz * p.z);
       vp++;
       vp->Init(p+mat.i*Para.Side,-mat.j,1.0f,i+(1/Para.Steps));
+      vp->tx = vp->nx * (vp->nx * p.x);
+      vp->ty = vp->ny * (vp->ny * p.y);
+      vp->tz = vp->nz * (vp->nz * p.z);
       vp++;
     }
   }
@@ -338,7 +344,7 @@ void RNRibbons::Render(Wz4RenderContext *ctx)
 RNRibbons2::RNRibbons2()
 {
   Geo = new sGeometry;
-  Geo->Init(sGF_TRILIST|sGF_INDEX32,sVertexFormatStandard);
+  Geo->Init(sGF_TRILIST|sGF_INDEX32,sVertexFormatTangent);
   Mtrl = new sSimpleMaterial;
   Mtrl->Flags = sMTRL_CULLOFF|sMTRL_ZON|sMTRL_LIGHTING;
   Mtrl->Prepare(sVertexFormatStandard);
@@ -368,7 +374,7 @@ void RNRibbons2::Simulate(Wz4RenderContext *ctx)
 
 void RNRibbons2::Prepare(Wz4RenderContext *ctx)
 {
-  sVertexStandard *vp;
+  sVertexTangent *vp;
   sVector31 pos;
   sVector30 speed;
   sVector30 camdir,norm;
@@ -431,7 +437,13 @@ void RNRibbons2::Prepare(Wz4RenderContext *ctx)
       norm.Unit();
 
       vp[0].Init(pos-d0,norm,0.0f,j+(1/Para.Length));
+      vp->tx = vp->nx * (vp->nx * pos.x);
+      vp->ty = vp->ny * (vp->ny * pos.y);
+      vp->tz = vp->nz * (vp->nz * pos.z);
       vp[1].Init(pos+d0,norm,1.0f,j+(1/Para.Length));
+      vp->tx = vp->nx * (vp->nx * pos.x);
+      vp->ty = vp->ny * (vp->ny * pos.y);
+      vp->tz = vp->nz * (vp->nz * pos.z);
       vp+=2;
     }
   }
@@ -535,11 +547,21 @@ void RNRibbons2::Eval(const sVector31 &pos,sVector30 &norm)
 /***                                                                      ***/
 /****************************************************************************/
 
+struct BlowNoiseVertex // 44 bytes
+{
+  sVector31 Pos;
+  sVector30 Normal;
+  sVector30 Tangent;
+  sF32 U,V;
+};
 
 RNBlowNoise::RNBlowNoise()
 {
+  static const sU32 desc[] = { sVF_POSITION,sVF_NORMAL,sVF_TANGENT|sVF_F3,sVF_UV0,0 };
+
+  VertFormat = sCreateVertexFormat(desc);
   Geo = new sGeometry;
-  Geo->Init(sGF_TRILIST|sGF_INDEX32,sVertexFormatStandard);
+  Geo->Init(sGF_TRILIST|sGF_INDEX32,VertFormat);
 
   Mtrl = 0;
   Verts = 0;
@@ -693,7 +715,7 @@ void RNBlowNoise::Prepare(Wz4RenderContext *ctx)
   }
 
 
-  // calc normals
+  // calc normals and tangents
 
   for(sInt y=1;y<SizeY-1;y++)
   {
@@ -709,19 +731,25 @@ void RNBlowNoise::Prepare(Wz4RenderContext *ctx)
       dy = p10-p11;
       v->Normal.Cross(dy,dx);
       v->Normal.Unit();
+      v->Tangent = dx - v->Normal * (v->Normal * dx);
+      v->Tangent.Unit();
     }
   }
 
   // load vb
 
-  sVertexStandard *vp;
+  BlowNoiseVertex *vp;
   sU32 *ip;
 
   v = Verts;
   Geo->BeginLoadVB(SizeX*SizeY,sGD_FRAME,&vp);
   for(sInt i=0;i<SizeX*SizeY;i++)
   {
-    vp->Init(v->Pos,v->Normal,v->U,v->V);
+    vp->Pos = v->Pos;
+    vp->Normal = v->Normal;
+    vp->Tangent = v->Tangent;
+    vp->U = v->U;
+    vp->V = v->V;
     vp++;
     v++;
   }

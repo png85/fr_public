@@ -5,7 +5,19 @@
 #include <string.h>
 #include <stdlib.h>
 
+// TODO:
+// - VU meters?
+
+// Ye olde original V2 bugs you can turn on and off :)
+#define BUG_V2_FM_RANGE 1     // Broken sine range reduction for FM oscis
+
+// Debugging tools
 #define DEBUGSCOPES 0
+#define COVERAGE    0
+
+// --------------------------------------------------------------------------
+// Debug scopes
+// --------------------------------------------------------------------------
 
 #if DEBUGSCOPES
 #include "scope.h"
@@ -27,8 +39,20 @@
   DEBUG_PLOT_STRIDED(DEBUG_PLOT_CHAN(which, 0), &(data)->l, 2, (nsamples)); \
   DEBUG_PLOT_STRIDED(DEBUG_PLOT_CHAN(which, 1), &(data)->r, 2, (nsamples))
 
-// TODO:
-// - VU meters?
+// --------------------------------------------------------------------------
+// Code coverage
+// --------------------------------------------------------------------------
+
+#if COVERAGE
+#include <stdio.h>
+
+static const char *code_coverage[500];
+#define COVER(desc) code_coverage[__COUNTER__] = (desc)
+
+static sInt synthGetNumCoverage();
+#else
+#define COVER(desc)
+#endif
 
 // --------------------------------------------------------------------------
 // Constants.
@@ -130,7 +154,12 @@ static sF32 fastsinrc(sF32 x)
 
   // first range reduction: mod with 2pi
   x = fmodf(x, fc2pi);
-  // now x in [0,2pi]
+  // now x in [-2pi,2pi]
+
+#if !BUG_V2_FM_RANGE
+  if (x < 0.0f)
+    x += fc2pi;
+#endif
 
   // need to reduce to [-pi/2, pi/2] to call fastsin
   if (x > fc1p5pi) // x in (3pi/2,2pi]
@@ -209,6 +238,20 @@ static inline sU32 ftou32(sF32 v)
 static inline sF32 lerp(sF32 a, sF32 b, sF32 t)
 {
   return a + t * (b-a);
+}
+
+// DEBUG
+#include <stdarg.h>
+#include <stdio.h>
+extern "C" void __stdcall OutputDebugStringA(const char *what);
+static void dprintf(const char *fmt, ...)
+{
+  char buf[256];
+  va_list arg;
+  va_start(arg, fmt);
+  vsprintf_s(buf, fmt, arg);
+  va_end(arg);
+  OutputDebugStringA(buf);
 }
 
 // --------------------------------------------------------------------------
@@ -649,6 +692,7 @@ private:
     // these possible cases into a bitmask and then does a single switch.
     // In practice, for all but very high-frequency waves, we're hitting the
     // "easy" cases a) and c) almost all the time.
+    COVER("Osc tri/saw");
 
     // calc helper values
     sF32 f = utof23(freq);
@@ -715,6 +759,7 @@ private:
     // this time the waveform is a pulse wave with variable pulse width,
     // which means we get very simple integrals. The state machine works
     // the exact same way, see above for description.
+    COVER("Osc pulse");
 
     // calc helper values
     sF32 f = utof23(freq);
@@ -769,6 +814,8 @@ private:
 
   void renderSin(sF32 *dest, sInt nsamples)
   {
+    COVER("Osc sin");
+
     // Sine is already a perfectly bandlimited waveform, so we needn't
     // worry about aliasing here.
     for (sInt i=0; i < nsamples; i++)
@@ -795,6 +842,8 @@ private:
 
   void renderNoise(sF32 *dest, sInt nsamples)
   {
+    COVER("Osc noise");
+
     V2LRC flt = nf;
     sU32 seed = nseed;
 
@@ -816,6 +865,8 @@ private:
 
   void renderFMSin(sF32 *dest, sInt nsamples)
   {
+    COVER("Osc FM");
+
     // V2's take on FM is a bit unconventional but fairly slick and flexible.
     // The carrier wave is always a sine, but the modulator is whatever happens
     // to be in the voice buffer at that point - which is the output of the
@@ -840,6 +891,8 @@ private:
 
   void renderAux(sF32 *dest, const StereoSample *src, sInt nsamples)
   {
+    COVER("Osc aux");
+
     sF32 g = gain * fcgain;
     for (sInt i=0; i < nsamples; i++)
     {
@@ -925,10 +978,12 @@ struct V2Env
     switch (state)
     {
     case OFF:
+      COVER("EG off");
       val = 0.0f;
       break;
 
     case ATTACK:
+      COVER("EG atk");
       val += atd;
       if (val >= 128.0f)
       {
@@ -938,18 +993,21 @@ struct V2Env
       break;
 
     case DECAY:
+      COVER("EG dcy");
       val *= dcf;
       if (val <= sul)
         state = SUSTAIN;
       break;
 
     case SUSTAIN:
+      COVER("EG sus");
       val *= suf;
       if (val > 128.0f)
         val = 128.0f;
       break;
 
     case RELEASE:
+      COVER("EG rel");
       val *= ref;
       break;
     }
@@ -1015,11 +1073,14 @@ struct V2Flt
 
     if (mode < MOOGL)
     {
+      COVER("VCF set regular");
       res = 1.0f - r;
       cfreq = f;
     }
     else
     {
+      COVER("VCF set moog");
+
       // @@@BUG? V2 code for this part looks suspicious.
       f *= 0.25f;
       sF32 t = 1.0f - f;
@@ -1038,6 +1099,7 @@ struct V2Flt
     switch (mode & 7)
     {
     case BYPASS:
+      COVER("VCF bypass");
       // @@@BUG ignores step? this is wrong but I suppose this
       // never gets hit for stereo case.
       if (dest != src)
@@ -1045,6 +1107,7 @@ struct V2Flt
       break;
 
     case LOW:
+      COVER("VCF low");
       flt = lrc;
       for (sInt i=0; i < nsamples; i++)
       {
@@ -1055,6 +1118,7 @@ struct V2Flt
       break;
 
     case BAND:
+      COVER("VCF band");
       flt = lrc;
       for (sInt i=0; i < nsamples; i++)
       {
@@ -1065,6 +1129,7 @@ struct V2Flt
       break;
 
     case HIGH:
+      COVER("VCF high");
       flt = lrc;
       for (sInt i=0; i < nsamples; i++)
       {
@@ -1075,6 +1140,7 @@ struct V2Flt
       break;
 
     case NOTCH:
+      COVER("VCF notch");
       flt = lrc;
       for (sInt i=0; i < nsamples; i++)
       {
@@ -1085,6 +1151,7 @@ struct V2Flt
       break;
 
     case ALL:
+      COVER("VCF all");
       flt = lrc;
       for (sInt i=0; i < nsamples; i++)
       {
@@ -1095,6 +1162,7 @@ struct V2Flt
       break;
 
     case MOOGL:
+      COVER("VCF moog low");
       // Moog filters are 2x oversampled, so run filter twice.
       m = moog;
       for (sInt i=0; i < nsamples; i++)
@@ -1107,6 +1175,7 @@ struct V2Flt
       break;
 
     case MOOGH:
+      COVER("VCF moog high");
       m = moog;
       for (sInt i=0; i < nsamples; i++)
       {
@@ -1177,16 +1246,19 @@ struct V2LFO
     switch ((sInt)para->pol)
     {
     case 0: // +
+      COVER("LFO pol +");
       gain = para->amp;
       dc = 0.0f;
       break;
 
     case 1: // -
+      COVER("LFO pol -");
       gain = -para->amp;
       dc = 0.0f;
       break;
 
     case 2: // +/-
+      COVER("LFO pol +/-");
       gain = para->amp;
       dc = -0.5f * para->amp;
       break;
@@ -1197,6 +1269,7 @@ struct V2LFO
   {
     if (sync)
     {
+      COVER("LFO sync");
       cntr = cphase;
       last = ~0u;
     }
@@ -1211,25 +1284,30 @@ struct V2LFO
     {
     case SAW:
     default:
+      COVER("LFO saw");
       v = utof23(cntr);
       break;
 
     case TRI:
-      x = (cntr << 1) | (sS32(cntr) >> 31);
-      v = utof23(cntr);
+      COVER("LFO tri");
+      x = (cntr << 1) ^ (sS32(cntr) >> 31);
+      v = utof23(x);
       break;
 
     case PULSE:
+      COVER("LFO pulse");
       x = sS32(cntr) >> 31;
-      v = utof23(cntr);
+      v = utof23(x);
       break;
 
     case SIN:
+      COVER("LFO sin");
       v = utof23(cntr);
       v = fastsinrc(v * fc2pi) * 0.5f + 0.5f;
       break;
 
     case S_H:
+      COVER("LFO sample+hold");
       if (cntr < last)
         nseed = urandom(&nseed);
       last = cntr;
@@ -1242,7 +1320,7 @@ struct V2LFO
     if (cntr < (sU32)freq && eg) // in one-shot mode, clamp at wrap-around
       cntr = ~0u;
 
-    DEBUG_PLOT_VAL(this, out);
+    DEBUG_PLOT_VAL(this, out / 128.0f);
   }
 };
 
@@ -1356,21 +1434,25 @@ struct V2Dist
       break;
 
     case OVERDRIVE:
+      COVER("DIST overdrive");
       for (sInt i=0; i < nsamples; i++)
         dest[i] = overdrive(src[i]);
       break;
 
     case CLIP:
+      COVER("DIST clip");
       for (sInt i=0; i < nsamples; i++)
         dest[i] = clip(src[i]);
       break;
 
     case BITCRUSHER:
+      COVER("DIST bitcrusher");
       for (sInt i=0; i < nsamples; i++)
         dest[i] = bitcrusher(src[i]);
       break;
 
     case DECIMATOR:
+      COVER("DIST mono decimator");
       for (sInt i=0; i < nsamples; i++)
       {
         decimator_tick(src[i], 0.0f);
@@ -1379,6 +1461,7 @@ struct V2Dist
       break;
 
     default: // filters
+      COVER("DIST mono filter");
       fltl.render(dest, src, nsamples);
       break;
     }
@@ -1393,6 +1476,7 @@ struct V2Dist
     switch (mode)
     {
     case DECIMATOR:
+      COVER("DIST stereo decimator");
       for (sInt i=0; i < nsamples; i++)
       {
         decimator_tick(src[i].l, src[i].r);
@@ -1406,6 +1490,7 @@ struct V2Dist
     case FLT_HIGH:
     case FLT_NOTCH:
     case FLT_ALL:
+      COVER("DIST stereo filter");
       fltl.render(&dest[0].l, &src[0].l, nsamples, 2);
       fltr.render(&dest[0].r, &src[0].r, nsamples, 2);
       break;
@@ -1604,16 +1689,19 @@ struct V2Voice
     switch (fmode)
     {
     case FLTR_SINGLE:
+      COVER("VOICE filter single");
       vcf[0].render(voice, voice, nsamples);
       break;
 
     case FLTR_SERIAL:
     default:
+      COVER("VOICE filter serial");
       vcf[0].render(voice, voice, nsamples);
       vcf[1].render(voice, voice, nsamples);
       break;
 
     case FLTR_PARALLEL:
+      COVER("VOICE filter parallel");
       vcf[1].render(voice2, voice, nsamples);
       vcf[0].render(voice, voice, nsamples);
       for (sInt i=0; i < nsamples; i++)
@@ -1702,6 +1790,7 @@ struct V2Voice
     switch (keysync)
     {
     case SYNC_FULL:
+      COVER("VOICE noteOn sync full");
       for (sInt i=0; i < syVV2::NENV; i++)
         env[i].val = 0.0f;
       curvol = 0.0f;
@@ -1716,6 +1805,7 @@ struct V2Voice
       // fall-through
 
     case SYNC_OSC:
+      COVER("VOICE noteOn sync osc");
       for (sInt i=0; i < syVV2::NOSC; i++)
         osc[i].cnt = 0;
       // fall-through
@@ -1780,6 +1870,8 @@ struct V2Boost
     if (!enabled)
       return;
 
+    COVER("BOOST set");
+
     // A = 10^(dBgain/40), or a rough approximation anyway
     sF32 A = powf(2.0f, para->amount / 128.0f);
 
@@ -1797,7 +1889,7 @@ struct V2Boost
     // a0 = (A+1) + (A-1)*cos + beta*sin
     sF32 ia0 = 1.0f / (Ap1 + cAm1 + bs);
 
-    b1 = 2.0f * A * (Am1 - cAp1) * A * 2.0f * ia0;
+    b1 = 2.0f * A * (Am1 - cAp1) * ia0;
     a1 = -2.0f * (Am1 + cAp1) * ia0;
     a2 = (Ap1 + cAm1 - bs) * ia0;
     b0 = A * (Ap1 - cAm1 + bs) * ia0;
@@ -1808,6 +1900,8 @@ struct V2Boost
   {
     if (!enabled)
       return;
+
+    COVER("BOOST render");
 
     for (sInt ch=0; ch < 2; ch++)
     {
@@ -1906,6 +2000,8 @@ struct V2ModDel
     if (!wetout)
       return;
 
+    COVER("MODDEL aux->main");
+
     for (sInt i=0; i < nsamples; i++)
     {
       StereoSample x;
@@ -1922,6 +2018,8 @@ struct V2ModDel
   {
     if (!wetout)
       return;
+
+    COVER("MODDEL chan");
 
     sF32 dry = dryout;
     for (sInt i=0; i < nsamples; i++)
@@ -2081,16 +2179,20 @@ struct V2Comp
     if (mode & MODE_BIT_OFF)
       return;
 
+    COVER("COMP render");
+
     // Step 1: level detect (fills LD buffers)
     StereoSample *levels = inst->levelbuf;
     switch (mode & (MODE_BIT_RMS | MODE_BIT_STEREO))
     {
     case MODE_BIT_PEAK | MODE_BIT_MONO:
+      COVER("COMP level peak mono");
       for (sInt i=0; i < nsamples; i++)
         levels[i].l = levels[i].r = invol * doPeak(0.5f * (buf[i].l + buf[i].r), 0);
       break;
 
     case MODE_BIT_RMS | MODE_BIT_MONO:
+      COVER("COMP level rms mono");
       for (sInt i=0; i < nsamples; i++)
       {
         levels[i].l = levels[i].r = invol * doRMS(0.5f * (buf[i].l + buf[i].r), 0);
@@ -2099,6 +2201,7 @@ struct V2Comp
       break;
 
     case MODE_BIT_PEAK | MODE_BIT_STEREO:
+      COVER("COMP level peak stereo");
       for (sInt i=0; i < nsamples; i++)
       {
         levels[i].l = invol * doPeak(buf[i].l, 0);
@@ -2107,6 +2210,7 @@ struct V2Comp
       break;
 
     case MODE_BIT_RMS | MODE_BIT_STEREO:
+      COVER("COMP level rms stereo");
       for (sInt i=0; i < nsamples; i++)
       {
         levels[i].l = invol * doRMS(buf[i].l, 0);
@@ -2141,6 +2245,7 @@ struct V2Comp
         buf[i].ch[ch] = v * gain;
       }
 
+      curgain[ch] = gain;
       if (ch == 1)
         dbcnt = dbind;
     }
@@ -2269,6 +2374,8 @@ struct V2Reverb
   {
     const sF32 *inbuf = inst->aux1buf;
 
+    COVER("RVB render");
+
     for (sInt i=0; i < nsamples; i++)
     {
       sF32 in = inbuf[i] * gainin + fcdcoffset;
@@ -2385,6 +2492,7 @@ struct V2Chan
 
     // Filters
     dcf1.renderStereo(chan, chan, nsamples);
+    DEBUG_PLOT_STEREO(&dcf1, chan, nsamples);
     comp.render(chan, nsamples);
     boost.render(chan, nsamples);
     if (fxr == FXR_DIST_THEN_CHORUS)
@@ -2411,7 +2519,7 @@ struct V2Chan
     // Channel buffer to mix buffer (stereo)
     accumulate(inst->mixbuf, chan, nsamples, chgain);
 
-    DEBUG_PLOT_STEREO(this, inst->mixbuf, nsamples);
+    DEBUG_PLOT_STEREO(this, chan, nsamples);
   }
 
 private:
@@ -2472,6 +2580,8 @@ struct syWRonan
   sU8 mem[64*1024]; // "that should be enough" --synth.asm. :)
 };
 
+#ifdef RONAN
+
 extern "C"
 {
   void __stdcall ronanCBInit(syWRonan *pthis);
@@ -2482,6 +2592,20 @@ extern "C"
   void __stdcall ronanCBProcess(syWRonan *pthis, sF32 *buf, sU32 len);
   void __stdcall ronanCBSetSR(syWRonan *pthis, sInt samplerate);
 }
+
+#else
+
+static inline void ronanCBInit(syWRonan *) {}
+static inline void ronanCBTick(syWRonan *) {}
+static inline void ronanCBNoteOn(syWRonan *) {}
+static inline void ronanCBNoteOff(syWRonan *) {}
+static inline void ronanCBSetCtl(syWRonan *, sU32, sU32) {}
+static inline void ronanCBProcess(syWRonan *, sF32 *, sU32) {}
+static inline void ronanCBSetSR(syWRonan *, sInt) {}
+
+extern "C" void __stdcall synthSetLyrics(void *, const char **) {}
+
+#endif
 
 // --------------------------------------------------------------------------
 // Synth
@@ -2583,16 +2707,19 @@ struct V2Synth
     dcf.init(&instance);
 
     // debug plots (uncomment the ones you want)
-    sInt sr_plot = 48000/10; // plot rate
+    sInt sr_plot = 44100/10; // plot rate
     sInt sr_lfo = 800;
     sInt w = 800, h = 150;
 
-    DEBUG_PLOT_OPEN(&voicesw[0].osc[0], "Voice 0 VCO 0", sr_plot, w, h);
+    //DEBUG_PLOT_OPEN(&voicesw[0].osc[0], "Voice 0 VCO 0", sr_plot, w, h);
     //DEBUG_PLOT_OPEN(&voicesw[0].osc[1], "Voice 0 VCO 1", sr_plot, w, h);
     //DEBUG_PLOT_OPEN(&voicesw[0].vcf[0], "Voice 0 VCF 0", sr_plot, w, h);
     //DEBUG_PLOT_OPEN(&voicesw[0].env[0], "Voice 0 Env 0", sr_lfo, w, h);
+    //DEBUG_PLOT_OPEN(&voicesw[0].lfo[0], "Voice 0 LFO 0", sr_lfo, w, h);
     DEBUG_PLOT_OPEN(&voicesw[0].dist, "Voice 0 Dist", sr_plot, w, h);
     DEBUG_PLOT_OPEN(&voicesw[0], "Voice 0 final", sr_plot, w, h);
+    //DEBUG_PLOT_OPEN(DEBUG_PLOT_CHAN(&chansw[0].dcf1, 0), "Chan 0 DCF1 L", sr_plot, w, h);
+    //DEBUG_PLOT_OPEN(DEBUG_PLOT_CHAN(&chansw[0].dcf1, 1), "Chan 0 DCF1 R", sr_plot, w, h);
     //DEBUG_PLOT_OPEN(DEBUG_PLOT_CHAN(&chansw[0], 0), "Channel 0 L", sr_plot, w, h);
     //DEBUG_PLOT_OPEN(DEBUG_PLOT_CHAN(&chansw[0], 1), "Channel 0 R", sr_plot, w, h);
     //DEBUG_PLOT_OPEN(DEBUG_PLOT_CHAN(&instance.mixbuf, 0), "Mix L", sr_plot, w, h);
@@ -2618,9 +2745,13 @@ struct V2Synth
       if (!buf2) // interleaved samples
       {
         if (!add)
+        {
+          COVER("OUT interleaved set");
           memcpy(buf, src, nread * sizeof(StereoSample));
+        }
         else
         {
+          COVER("OUT interleaved add");
           for (sInt i=0; i < nread; i++)
           {
             buf[i*2+0] += src[i].l;
@@ -2634,6 +2765,7 @@ struct V2Synth
       {
         if (!add)
         {
+          COVER("OUT separate set");
           for (sInt i=0; i < nread; i++)
           {
             buf[i] = src[i].l;
@@ -2642,6 +2774,7 @@ struct V2Synth
         }
         else
         {
+          COVER("OUT separate add");
           for (sInt i=0; i < nread; i++)
           {
             buf[i] += src[i].l;
@@ -2676,6 +2809,7 @@ struct V2Synth
       case 1: // Note on
         if (cmd[1] != 0) // velocity==0 is actually a note off
         {
+          COVER("MIDI note on");
           if (chan == CHANS-1)
             ronanCBNoteOn(&ronan);
 
@@ -2704,6 +2838,7 @@ struct V2Synth
             }
 
             // okay, need to find a free voice. we'll take any channel.
+            COVER("SYN find voice any");
             chanmask = 0;
             chanfind = 0;
           }
@@ -2712,6 +2847,7 @@ struct V2Synth
             // if we're at polyphony limit, we know there's at least one voice
             // used by this channel, so we can limit ourselves to killing
             // voices from our own chan.
+            COVER("SYN find voice channel");
             chanmask = 0xf;
             chanfind = chan;
           }
@@ -2719,6 +2855,7 @@ struct V2Synth
           // don't have a voice yet? kill oldest eligible one with gate off.
           if (usevoice < 0)
           {
+            COVER("SYN replace voice gate off");
             sU32 oldest = curalloc;
             for (sInt i=0; i < POLY; i++)
             {
@@ -2733,6 +2870,7 @@ struct V2Synth
           // still no voice? okay, just take the oldest one we can find, period.
           if (usevoice < 0)
           {
+            COVER("SYN replace voice oldest");
             sU32 oldest = curalloc;
             for (sInt i=0; i < POLY; i++)
             {
@@ -2759,6 +2897,7 @@ struct V2Synth
         // fall-through (for when we had a note off)
 
       case 0: // Note off
+        COVER("MIDI note off");
         if (chan == CHANS-1)
           ronanCBNoteOff(&ronan);
 
@@ -2775,10 +2914,12 @@ struct V2Synth
         break;
 
       case 2: // Aftertouch
+        COVER("MIDI aftertouch");
         cmd++; // ignored
         break;
 
       case 3: // Control change
+        COVER("MIDI controller change");
         {
           sInt ctrl = cmd[0];
           sU8 val = cmd[1];
@@ -2790,6 +2931,7 @@ struct V2Synth
           }
           else if (ctrl == 120) // CC #120: all sound off
           {
+            COVER("MIDI CC all sound off");
             for (sInt i=0; i < POLY; i++)
             {
               if (chanmap[i] != chan)
@@ -2801,6 +2943,7 @@ struct V2Synth
           }
           else if (ctrl == 123) // CC #123: all notes off
           {
+            COVER("MIDI CC all notes off");
             if (chan == CHANS-1)
               ronanCBNoteOff(&ronan);
 
@@ -2815,11 +2958,13 @@ struct V2Synth
         break;
 
       case 4: // Program change
+        COVER("MIDI program change");
         {
           sU8 pgm = *cmd++ & 0x7f;
           // did the program actually change?
           if (chans[chan].pgm != pgm)
           {
+            COVER("MIDI program change real");
             chans[chan].pgm = pgm;
 
             // need to turn all voices on this channel off.
@@ -2837,14 +2982,17 @@ struct V2Synth
         break;
 
       case 5: // Pitch bend
+        COVER("MIDI pitch bend");
         cmd += 2; // ignored
         break;
 
       case 6: // Poly Aftertouch
+        COVER("MIDI poly aftertouch");
         cmd += 2; // ignored
         break;
 
       case 7: // System
+        COVER("MIDI system exclusive");
         if (chan == 0xf) // Reset
           init(patchmap, samplerate);
         break; // rest ignored
@@ -2905,15 +3053,30 @@ private:
 
     switch (source)
     {
-    case 0: in = voice->velo; break;        // velocity
+    case 0: // velocity
+      COVER("MOD src vel");
+      in = voice->velo;
+      break;
+
     case 1: case 2: case 3: case 4: case 5: case 6: case 7: // controller value
+      COVER("MOD src ctl");
       in = chans[chan].ctl[source-1];
       break;
-    case 8: in = voice->env[0].out; break;  // EG1 output
-    case 9: in = voice->env[1].out; break;  // EG2 output
-    case 10: in = voice->lfo[0].out; break; // LFO1 output
-    case 11: in = voice->lfo[1].out; break; // LFO2 output
-    default: in = 2.0f * (voice->note - 48.0f); break; // note
+
+    case 8: case 9: // EG output
+      COVER("MOD src EG");
+      in = voice->env[source-8].out;
+      break;
+
+    case 10: case 11: // LFO output
+      COVER("MOD src LFO");
+      in = voice->lfo[source-10].out;
+      break;
+
+    default: // note
+      COVER("MOD src note");
+      in = 2.0f * (voice->note - 48.0f);
+      break;
     }
 
     return in;
@@ -2921,6 +3084,7 @@ private:
 
   void storeV2Values(sInt vind)
   {
+    assert(vind >= 0 && vind < POLY);
     sInt chan = chanmap[vind];
     if (chan < 0)
       return;
@@ -2953,6 +3117,8 @@ private:
 
   void storeChanValues(sInt chan)
   {
+    assert(chan >= 0 && chan < CHANS);
+
     // get patch definition
     const V2Sound *patch = getpatch(chans[chan].pgm);
 
@@ -3004,6 +3170,22 @@ private:
     ronanCBTick(&ronan);
     tickd = instance.SRcFrameSize;
     renderFrame();
+
+#if COVERAGE
+    // print coverage updates as they happen
+    static int cur_frame;
+    static const char *old_coverage[COUNTOF(code_coverage)];
+    sInt ccount = synthGetNumCoverage();
+    for (sInt i=0; i < ccount; i++)
+    {
+      if (old_coverage[i] != code_coverage[i])
+      {
+        old_coverage[i] = code_coverage[i];
+        printf("[%5d,%3d] %s\n", cur_frame, i, code_coverage[i]);
+      }
+    }
+    cur_frame++;
+#endif
   }
 
   void renderFrame()
@@ -3146,5 +3328,22 @@ extern "C" void * __stdcall synthGetSpeechMem(void *pthis)
 {
   return &((V2Synth *)pthis)->ronan;
 }
+
+#if COVERAGE
+
+void synthPrintCoverage()
+{
+  int end = synthGetNumCoverage();
+  printf("synth coverage:\n");
+  for (int i=0; i < end; i++)
+    printf("[%3d] %s\n", i, code_coverage[i] ? code_coverage[i] : "<not hit>");
+}
+
+static int synthGetNumCoverage()
+{
+  return __COUNTER__;
+}
+
+#endif
 
 // vim: sw=2:sts=2:et:cino=\:0l1g0(0

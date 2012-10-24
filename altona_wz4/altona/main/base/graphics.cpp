@@ -70,6 +70,7 @@ sVertexFormatHandle *sVertexFormatBasic;
 sVertexFormatHandle *sVertexFormatStandard;
 sVertexFormatHandle *sVertexFormatSingle;
 sVertexFormatHandle *sVertexFormatDouble;
+sVertexFormatHandle *sVertexFormatTangent;
 sVertexFormatHandle *sVertexFormatTSpace;
 sVertexFormatHandle *sVertexFormatTSpace4;
 sVertexFormatHandle *sVertexFormatTSpace4_uv3;
@@ -81,6 +82,7 @@ sU32 DeclBasic[]         = { sVF_POSITION,sVF_COLOR0,0 };
 sU32 DeclStandard[]      = { sVF_POSITION,sVF_NORMAL,sVF_UV0,0 };
 sU32 DeclSingle[]        = { sVF_POSITION,sVF_COLOR0,sVF_UV0,0 };
 sU32 DeclDouble[]        = { sVF_POSITION,sVF_COLOR0,sVF_UV0,sVF_UV1,0 };
+sU32 DeclTangent[]       = { sVF_POSITION,sVF_NORMAL,sVF_TANGENT|sVF_F3,sVF_UV0,0 };
 sU32 DeclTSpace[]        = { sVF_POSITION,sVF_NORMAL,sVF_TANGENT|sVF_F3,sVF_COLOR0,sVF_UV0,sVF_UV1,0 };
 sU32 DeclTSpace4[]       = { sVF_POSITION,sVF_NORMAL,sVF_TANGENT|sVF_F4,sVF_COLOR0,sVF_UV0,sVF_UV1,0 };
 sU32 DeclTSpace4_uv3[]   = { sVF_POSITION,sVF_NORMAL,sVF_TANGENT|sVF_F4,sVF_COLOR0,sVF_UV0,sVF_UV1,sVF_UV2,0 };
@@ -99,6 +101,7 @@ void sInitGfxCommon()
   sVertexFormatStandard = sCreateVertexFormat(DeclStandard);
   sVertexFormatSingle   = sCreateVertexFormat(DeclSingle);
   sVertexFormatDouble   = sCreateVertexFormat(DeclDouble);
+  sVertexFormatTangent   = sCreateVertexFormat(DeclTangent);
   sVertexFormatTSpace   = sCreateVertexFormat(DeclTSpace);
   sVertexFormatTSpace4  = sCreateVertexFormat(DeclTSpace4);
   sVertexFormatTSpace4_uv3  = sCreateVertexFormat(DeclTSpace4_uv3);
@@ -1829,6 +1832,7 @@ sTextureProxy::sTextureProxy()
 {
   Link = 0;
   Node.Proxy = this;
+  Flags = sTEX_PROXY;
 }
 
 sTextureProxy::~sTextureProxy()
@@ -1857,17 +1861,23 @@ void sTextureProxy::Connect(sTextureBase *tex)
     Link->Proxies.Rem(&Node);
     Link = 0;
 
-    Flags = 0;
+    Flags = sTEX_PROXY;
     Mipmaps = 0;
     BitsPerPixel = 0;
     SizeX = 0;
     SizeY = 0;
     SizeZ = 0;
   }
+
+  while (tex && tex->Flags&sTEX_PROXY)
+  {
+    tex = ((sTextureProxy*)tex)->Link;
+  }
+
   Link = tex;
   if(Link)
   {
-    Flags = Link->Flags;
+    Flags = Link->Flags|sTEX_PROXY;
     Mipmaps = Link->Mipmaps;
     BitsPerPixel = Link->BitsPerPixel;
     SizeX = Link->SizeX;
@@ -1875,7 +1885,6 @@ void sTextureProxy::Connect(sTextureBase *tex)
     SizeZ = Link->SizeZ;
 
     Link->Proxies.AddTail(&Node);
-    
     Connect2();
   }
 }
