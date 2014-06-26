@@ -11,6 +11,7 @@
 #include "base/types.hpp"
 #include "base/types2.hpp"
 #include "util/image.hpp"
+#include "util/movieplayer.hpp"
 
 /****************************************************************************/
 
@@ -67,12 +68,14 @@ public:
   sString<64> ID;
   sString<64> Type;
   sString<256> Path;
+  sString<64> SlideType; // chooses certain renderer
 
   sF32 Duration;
   sInt TransitionId;
   sF32 TransitionDuration;
   sBool ManualAdvance;
   sBool Mute;
+  sInt MidiNote;
 
   sString<10> BarColor, BarBlinkColor1, BarBlinkColor2;
   sF32 BarAlpha;
@@ -156,6 +159,7 @@ enum SlideType
   IMAGE,
   SIEGMEISTER_BARS,
   SIEGMEISTER_WINNERS,
+  VIDEO,
 };
 
 class SiegmeisterData
@@ -174,14 +178,22 @@ public:
   SlideType Type;
   sInt TransitionId;
   sF32 TransitionTime;
+  sInt MidiNote;
 
   sImageData *ImgData;
-  SiegmeisterData *SiegData;
+  sBool ImgOpaque;
+  sImage *OrgImage;
 
+  SiegmeisterData *SiegData;
+  sMoviePlayer *Movie;
+
+  const sChar *Id;
   sBool Error;
 
-  NewSlideData() : ImgData(0), SiegData(0) {}
-  ~NewSlideData() { delete ImgData; delete SiegData; }
+  const sChar *RenderType;
+
+  NewSlideData() : ImgData(0), SiegData(0), Movie(0), Id(0), OrgImage(0), RenderType(0) {}
+  ~NewSlideData() { delete ImgData; delete OrgImage; delete SiegData; sRelease(Movie); }
 };
 
 class PlaylistMgr
@@ -207,7 +219,7 @@ public:
   void Next(sBool hard, sBool force);
   void Previous(sBool hard);
 
-  NewSlideData* OnFrame(sF32 delta);
+  NewSlideData* OnFrame(sF32 delta, const sChar *doneId, sBool doneHard);
   sBool OnInput(const sInput2Event &ev);
 
 private:
@@ -224,12 +236,13 @@ private:
 
   sArray<Asset*> Assets;
   sDList<Asset, &Asset::RefreshNode> RefreshList;
+  volatile Asset* CurRefreshing;
 
   sF64 Time;
   PlayPosition CurrentPos, LastLoopPos;
   Playlist *CurrentPl;
   sInt CurrentPlTime;
-  sF64 CurrentDuration, CurrentSwitchTime;
+  sF64 CurrentDuration, CurrentSwitchTime, CurrentSlideTime;
   sBool SwitchHard;
   NewSlideData * volatile PreparedSlide;
 

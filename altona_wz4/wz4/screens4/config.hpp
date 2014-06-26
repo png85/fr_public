@@ -23,9 +23,15 @@ public:
     sInt Width, Height, RefreshRate;
   };
 
+  struct Note
+  {
+    sInt Pitch, Velocity;
+    sF32 Duration;
+  };
+
   enum EventType
   {
-    PLAYSOUND, STOPSOUND, SETRESOLUTION, FULLSCREEN
+    PLAYSOUND, STOPSOUND, SETRESOLUTION, FULLSCREEN, MIDINOTE
   };
 
   struct KeyEvent
@@ -34,6 +40,7 @@ public:
     EventType Type;
     sPoolString ParaStr;
     Resolution ParaRes;
+    Note ParaNote;
   };
 
   sInt Port;
@@ -43,6 +50,15 @@ public:
   sArray<KeyEvent> Keys;
   sF32 BarAnimTime;
   sF32 BarAnimSpread;
+  sF32 MovieVolume; 
+  sPoolString SlidePrefix;
+  sPoolString TransPrefix;
+  sPoolString DefaultType;
+
+  sInt MidiDevice;
+  sInt MidiChannel;
+
+  sPoolString PngOut;
 
   Config()
   {
@@ -53,6 +69,13 @@ public:
     HttpPort = 8080;
     BarAnimTime = 9;
     BarAnimSpread = 0.5;
+    MovieVolume = 1.0;
+    SlidePrefix = L"slide";
+    TransPrefix = L"trans";
+    DefaultType = L"";
+    MidiDevice = -1;
+    MidiChannel = 1;
+    PngOut = L"";
   }
 
   sBool Read(const sChar *filename)
@@ -95,6 +118,15 @@ private:
     res.RefreshRate = Scan->IfToken(',') ? Scan->ScanInt() : 0;
   }
 
+  void _Note(Note &n)
+  {
+    n.Pitch = sClamp(Scan->ScanInt(),0,127);
+    Scan->Match(',');
+    n.Velocity = sClamp(Scan->ScanInt(),0,127);
+    Scan->Match(',');
+    n.Duration = Scan->ScanFloat();
+  }
+
   void _Defaults()
   {
     Scan->Match('{');
@@ -112,6 +144,20 @@ private:
         BarAnimTime = sClamp(Scan->ScanFloat(),0.1f,100.0f);
       else if (Scan->IfName(L"barspread"))
         BarAnimSpread = sClamp(Scan->ScanFloat(),0.0f,1.0f);
+      else if (Scan->IfName(L"movievolume"))
+        MovieVolume = sFPow(10.0f,sClamp(Scan->ScanFloat(),-100.0f,12.0f)/20.0f);
+      else if (Scan->IfName(L"slideprefix"))
+        Scan->ScanString(SlidePrefix);
+      else if (Scan->IfName(L"transprefix"))
+        Scan->ScanString(TransPrefix);
+      else if (Scan->IfName(L"defaulttype"))
+        Scan->ScanString(DefaultType);
+      else if (Scan->IfName(L"mididevice"))
+        MidiDevice = Scan->ScanInt();
+      else if (Scan->IfName(L"midichannel"))
+        MidiChannel = sClamp(Scan->ScanInt(),1,16);
+      else if (Scan->IfName(L"pngout"))
+        Scan->ScanString(PngOut);
       else
         Scan->Error(L"syntax error");
     }
@@ -207,6 +253,11 @@ private:
       else if (Scan->IfName(L"togglefullscreen"))
       {
         ev.Type = FULLSCREEN;
+      }
+      else if (Scan->IfName(L"sendmidinote"))
+      {
+        ev.Type = MIDINOTE;
+        _Note(ev.ParaNote);
       }
       else
         Scan->Error(L"event type expected");

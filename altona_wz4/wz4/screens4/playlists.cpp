@@ -11,16 +11,20 @@
 #include "util/image.hpp"
 #include "image_win.hpp"
 
+extern void LogTime();
+
+
 /****************************************************************************/
 
 template<class streamer> void PlaylistItem::Serialize_(streamer &s)
 {
-  sInt version = s.Header(sSerId::Werkkzeug4+0x6401,1);
+  sInt version = s.Header(sSerId::Werkkzeug4+0x6401,2);
   if (version>0)
   {
     s | ID | Type | Path;
     s | Duration | TransitionId | TransitionDuration | ManualAdvance | Mute;
-    
+    if (version>=2) s | SlideType | MidiNote;
+
     s | BarColor | BarBlinkColor1 | BarBlinkColor2 | BarAlpha;
     s.ArrayAll(BarPositions);
   }
@@ -96,11 +100,12 @@ PlaylistMgr::PlaylistMgr()
 
   // initialize the miscallanea
   Assets.HintSize(1024);
-  CurrentDuration = CurrentSwitchTime = 0;
+  CurrentDuration = CurrentSwitchTime = CurrentSlideTime = 0;
   CurrentPl = 0;
   SwitchHard = sFALSE;
   PreparedSlide = 0;
   Time = 1.0; // one second phase shift into the future to hide the TARDIS
+  CurRefreshing = 0;
 
   // load all cached playlists
   sArray<sDirEntry> dir;
@@ -121,6 +126,7 @@ PlaylistMgr::PlaylistMgr()
         it->MyAsset->AddRef();
         if (it->MyAsset->CacheStatus == Asset::NOTCACHED)
         {
+          sScopeLock lock(&Lock);
           RefreshList.AddTail(it->MyAsset);
           it->MyAsset->AddRef();
         }
@@ -183,14 +189,14 @@ PlaylistMgr::~PlaylistMgr()
 
   sRelease(CurrentPl);
   delete PreparedSlide;
-
+  
 }
 
 // Adds new play list to pool (takes ownership of pl)
 void PlaylistMgr::AddPlaylist(Playlist *newpl)
 {
   if (!newpl) return;
-  sLogF(L"pl",L"AddPlaylist %s (%d)\n",newpl->ID,newpl->Timestamp);
+  LogTime(); sDPrintF(L"AddPlaylist %s (%d)\n",newpl->ID,newpl->Timestamp);
   
   Playlist *replaced = 0;
   // add new playlist (if not already existing)
@@ -205,17 +211,17 @@ void PlaylistMgr::AddPlaylist(Playlist *newpl)
       {
         if (newpl->Timestamp <= pl->Timestamp && newpl->Items.GetCount() == pl->Items.GetCount())
         {
-          sLogF(L"pl",L"-> already in cache\n");
+          LogTime(); sDPrintF(L"-> already in cache\n");
           RefreshAssets(pl);
           return;
         }
-        sLogF(L"pl",L"-> replacing (%d)\n",pl->Timestamp);
+        LogTime(); sDPrintF(L"-> replacing (%d)\n",pl->Timestamp);
         replaced = pl;
         Playlists.Rem(pl);
         break;
       }
     }
-    if (!replaced) sLogF(L"pl",L"-> new\n");
+    if (!replaced) LogTime(); sDPrintF(L"-> new\n");
     Playlists.AddTail(newpl);
   }
 
@@ -238,23 +244,68 @@ void PlaylistMgr::AddPlaylist(Playlist *newpl)
   PlCacheEvent.Signal();
 }
 
-NewSlideData* PlaylistMgr::OnFrame(sF32 delta)
+NewSlideData* PlaylistMgr::OnFrame(sF32 delta, const sChar *doneId, sBool doneHard)
 {
-  sScopeLock lock(&Lock);
-
-  // auto advance
-  if (CurrentSwitchTime>0 && (Time-CurrentSwitchTime)>=CurrentDuration)
   {
-    CurrentSwitchTime = 0;
-    Next(sFALSE, sTRUE);
+    sScopeLock lock(&Lock);
+
+    sString<64> curId = CurrentPl ? CurrentPl->Items[CurrentPos.SlideNo]->ID : L"";
+
+    // refresh next slide
+    if (CurrentSlideTime>0 && (Time-CurrentSlideTime)>=CurrentPl->Items[CurrentPos.SlideNo]->TransitionDuration+0.2f)
+    {
+      PlaylistItem *current =  CurrentPl->Items[CurrentPos.SlideNo%CurrentPl->Items.GetCount()];
+      PlaylistItem *next =  CurrentPl->Items[(CurrentPos.SlideNo+1)%CurrentPl->Items.GetCount()];
+      if (sCmpStringI(next->Type,L"video"))
+      {
+        if (!next->MyAsset->RefreshNode.IsValid())
+        {
+          next->MyAsset->AddRef();
+          RefreshList.AddHead(next->MyAsset);
+        }
+
+        CurrentSlideTime = 0;
+      }
+    }
+
+    // auto advance
+    if (CurrentSwitchTime>0 && (Time-CurrentSwitchTime)>=CurrentDuration)
+    {
+      CurrentSwitchTime = 0;
+      Next(sFALSE, sTRUE);
+    }
+    else if (doneId != 0 && !sCmpString(doneId,curId))
+    {
+      Next(doneHard, sTRUE);
+    }
+
+    Time += delta;
   }
 
-  Time += delta;
-
   NewSlideData *nsd = PreparedSlide;
-  PreparedSlide = 0;
+
+  if (nsd && nsd->Type == VIDEO && !nsd->Error)
+  {
+    // wait for first frame to be fully decoded. must be in rendering thread, thus here.
+    if (nsd->Movie->GetInfo().XSize<0)
+    {
+      nsd->Error = sTRUE;
+      sRelease(nsd->Movie);
+    }
+    else 
+    {
+      sFRect uvr;
+      nsd->Movie->GetFrame(uvr);
+      if (nsd->Movie->GetInfo().XSize==0 || uvr.SizeX()==0)
+        nsd = 0;
+    }
+  }
+
   if (nsd)
   {
+    PreparedSlide = 0;
+    CurrentSlideTime = Time;
+
     // prepare auto advance
     if (CurrentDuration>0)
       CurrentSwitchTime = Time;
@@ -336,7 +387,7 @@ void PlaylistMgr::GetCurrentPos(const sStringDesc &pl, const sStringDesc &slide)
 
 void PlaylistMgr::Seek(const sChar *plId, const sChar *slideId, sBool hard)
 {
-  sLogF(L"pl",L"Seek %s:%s %s\n",plId, slideId, hard?L"(hard)":L"");
+  LogTime(); sDPrintF(L"Seek %s:%s %s\n",plId, slideId, hard?L"(hard)":L"");
   Playlist *pl = GetPlaylist(plId);
   if (!pl) return;
   sInt slide = GetItem(pl,slideId);
@@ -346,7 +397,7 @@ void PlaylistMgr::Seek(const sChar *plId, const sChar *slideId, sBool hard)
 
 void PlaylistMgr::Next(sBool hard, sBool force)
 {
-  sLogF(L"pl",L"Next %s\n",hard?L"(hard)":L"");
+  LogTime(); sDPrintF(L"Next %s\n",hard?L"(hard)":L"");
   if (!CurrentPl) return;
   Playlist *pl = CurrentPl;
   sInt slide = CurrentPos.SlideNo;
@@ -372,7 +423,7 @@ void PlaylistMgr::Next(sBool hard, sBool force)
 
 void PlaylistMgr::Previous(sBool hard)
 {
-  sLogF(L"pl",L"Prev %s\n",hard?L"(hard)":L"");
+  LogTime(); sDPrintF(L"Prev %s\n",hard?L"(hard)":L"");
   if (!CurrentPl) return;
   Playlist *pl = CurrentPl;
   sInt slide = CurrentPos.SlideNo;
@@ -461,8 +512,11 @@ void PlaylistMgr::RefreshAssets(Playlist *pl)
     it->MyAsset->CacheStatus = Asset::NOTCACHED;
     {
       sScopeLock lock(&Lock);
-      it->MyAsset->AddRef();
-      RefreshList.AddTail(it->MyAsset);
+      if (!it->MyAsset->RefreshNode.IsValid())
+      {
+        it->MyAsset->AddRef();
+        RefreshList.AddTail(it->MyAsset);
+      }
     }
   }
   pl->Release();
@@ -515,10 +569,17 @@ void PlaylistMgr::RawSeek(Playlist *pl, sInt slide, sBool hard)
 
 void PlaylistMgr::PlCacheThreadFunc(sThread *t)
 {
+	int waitStart = 0;
   while (t->CheckTerminate())
   {
-    if (!PlCacheEvent.Wait(100))
-      continue;
+    if (PlCacheEvent.Wait(100))
+      waitStart = sGetTime();
+
+		if (waitStart==0 || (sGetTime()-waitStart < 3000 && t->CheckTerminate()))
+			continue;
+	
+		waitStart = 0;
+		LogTime(); sDPrintF(L"caching playlists\n");
 
     // get all dirty playlists
     sDList<Playlist, &Playlist::CacheNode> dirtyLists;
@@ -556,90 +617,109 @@ void PlaylistMgr::PlCacheThreadFunc(sThread *t)
       sString<sMAXPATH> fn = CacheDir; sAppendString(fn, L"LastLoopPos");
       sSaveObject(fn, &LastLoopPos);
     }
-      
+     
+		LogTime(); sDPrintF(L"caching playlists done\n");
   }
 }
 
 void PlaylistMgr::AssetThreadFunc(sThread *t)
 {
-  Asset *toRefresh = 0;
-
   static const int DLSIZE = 524288;
   sU8 *dlBuffer = new sU8[DLSIZE];
 
   while (t->CheckTerminate())
   {
-    if (RefreshList.IsEmpty() && !AssetEvent.Wait(100))
-      continue;
+    Asset *toRefresh = 0;
 
     // find asset to refresh
     {
       sScopeLock lock(&Lock);
-      if (!toRefresh) toRefresh = RefreshList.RemHead();
+      if (!RefreshList.IsEmpty())
+        toRefresh = RefreshList.RemHead();
     }
 
-    if (toRefresh)
+    if (!toRefresh)
     {
-      sString<sMAXPATH> filename, metafilename;
-      MakeFilename(filename,toRefresh->Path,AssetDir);
-      metafilename = filename;
-      sAppendString(metafilename,L".meta");
+      AssetEvent.Wait(100);
+      continue;
+    }
 
-      // send HTTP request...
-      sHTTPClient client;
-      client.SetETag(toRefresh->Meta.ETag);
-      client.Connect(toRefresh->Path);
+    CurRefreshing = toRefresh;
+		LogTime(); sDPrintF(L"refreshing %s\n",toRefresh->Path);
 
-      // .. and interpret response.
-      int code; 
-      client.GetStatus(code);
-      if (code>=400) // error :(
-      {
-        sLogF(L"pl",L"ERROR: refreshing %s resulted in %d\n",toRefresh->Path, code);
-        sDeleteFile(filename);
-        sDeleteFile(metafilename);
+    sString<sMAXPATH> filename, metafilename;
+    MakeFilename(filename,toRefresh->Path,AssetDir);
+    metafilename = filename;
+    sAppendString(metafilename,L".meta");
+
+    // send HTTP request...
+    sHTTPClient client;
+    client.SetETag(toRefresh->Meta.ETag);
+    sBool result = client.Connect(toRefresh->Path);
+
+    // .. and interpret response.
+    int code; 
+    client.GetStatus(code);
+    if (!result)
+    {
+      LogTime(); sDPrintF(L"ERROR: connection failed refreshing %s\n",toRefresh->Path);
+      if (toRefresh->CacheStatus == Asset::NOTCACHED)
         toRefresh->CacheStatus = Asset::INVALID;
-      }
-      else if (code == 304) // already cached \o/
-      {
-        //sLogF(L"pl",L"%s already cached\n",toRefresh->Path);
-        toRefresh->CacheStatus = Asset::CACHED;
-      }
-      else if (code == 200) // not cached or updated, download
-      {
-        sFile *file = sCreateFile(filename,sFA_WRITE);
-        sBool error = sFALSE;
+    }
+    else if (code>=400) // error :(
+    {
+      LogTime(); sDPrintF(L"ERROR: refreshing %s resulted in %d\n",toRefresh->Path, code);
+      if (toRefresh->CacheStatus == Asset::NOTCACHED)
+        toRefresh->CacheStatus = Asset::INVALID;
+    }
+    else if (code == 304) // already cached \o/
+    {
+      //LogTime(); sDPrintF(L"%s already cached\n",toRefresh->Path);
+      toRefresh->CacheStatus = Asset::CACHED;
+    }
+    else if (code == 200) // not cached or updated, download
+    {
+      sString<sMAXPATH> downloadfilename;
+      downloadfilename = filename;
+      sAppendString(downloadfilename,L".tmp");
 
-        for (;;)
-        {
-          sDInt read;
-          error = !client.Read(dlBuffer,DLSIZE,read);
-          if (error || read==0)
-            break;
-          file->Write(dlBuffer,read);
-        }
+      sFile *file = sCreateFile(downloadfilename,sFA_WRITE);
+      sBool error = sFALSE;
 
-        delete file;
-        if (error)
-        {
-          sLogF(L"pl",L"ERROR: download of %s failed\n",toRefresh->Path);
+      for (;;)
+      {
+        sDInt read;
+        error = !client.Read(dlBuffer,DLSIZE,read);
+        if (error || read==0)
+          break;
+        file->Write(dlBuffer,read);
+      }
+
+      delete file;
+      if (error)
+      {
+        LogTime(); sDPrintF(L"ERROR: download of %s failed\n",toRefresh->Path);
+        if (toRefresh->CacheStatus == Asset::NOTCACHED)
           toRefresh->CacheStatus = Asset::INVALID;
-          sDeleteFile(filename);
-          sDeleteFile(metafilename);
-        }
-        else
+        sDeleteFile(downloadfilename);
+      }
+      else
+      {
+        LogTime(); sDPrintF(L"downloaded %s\n",toRefresh->Path);
         {
-          sLogF(L"pl",L"downloaded %s\n",toRefresh->Path);
+          sScopeLock lock(&Lock);
+          sRenameFile(downloadfilename, filename, sTRUE);
           toRefresh->CacheStatus = Asset::CACHED;
           toRefresh->Meta.ETag = client.GetETag();
-          if (toRefresh->Meta.ETag==L"")
-            sLogF(L"pl",L"WARNING: no Etag!\n");
-          sSaveObject(metafilename,&toRefresh->Meta);
         }
+        if (toRefresh->Meta.ETag==L"")
+				{ LogTime(); sDPrintF(L"WARNING: no Etag!\n"); }
+        sSaveObject(metafilename,&toRefresh->Meta);
       }
-
-      sRelease(toRefresh);
     }
+
+    sRelease(toRefresh);
+    CurRefreshing = 0;
   }
 
   delete[] dlBuffer;
@@ -662,14 +742,33 @@ void PlaylistMgr::PrepareThreadFunc(sThread *t)
       if (!CurrentPl) continue;
       item = CurrentPl->Items[CurrentPos.SlideNo];
 
+			LogTime(); sDPrintF(L"preparing %s\n",item->Path);
+
+      /*
+      // TEST for video player as long as Partymeister doesn't give us mp4 files
+      if (!sCmpString(item->ID,L"70_7041"))
+      {
+        item->Path=L"c:\\test\\yay.mp4";
+        item->Type=L"Video";
+        item->MyAsset->CacheStatus = Asset::CACHED;
+        item->MyAsset->Path = item->Path;
+        item->TransitionDuration = 0.5f;
+        item->ManualAdvance = sFALSE;
+      }
+      */
+
       nsd = new NewSlideData;
-      nsd->ImgData = 0;
       nsd->Error = sFALSE;
+      nsd->Id = item->ID;
       nsd->TransitionId = item->TransitionId;
       nsd->TransitionTime = SwitchHard ? 0 : item->TransitionDuration;
+      nsd->RenderType = item->SlideType;
+      nsd->MidiNote = item->MidiNote;
 
       if (!sCmpStringI(item->Type,L"Image"))
         nsd->Type = IMAGE;
+      else if (!sCmpStringI(item->Type,L"Video"))
+        nsd->Type = VIDEO;
       else if (!sCmpStringI(item->Type,L"siegmeister_bars"))
       {
         nsd->Type = SIEGMEISTER_BARS;
@@ -680,7 +779,11 @@ void PlaylistMgr::PrepareThreadFunc(sThread *t)
         nsd->TransitionTime = 0;
       }
       else
+	    {
         nsd->Type = UNKNOWN;
+		    nsd->Error = sTRUE;
+		    LogTime(); sDPrintF(L"WARNING: got unknown slide type '%s'\n",item->Type);
+	    }
 
       myAsset = item->MyAsset;
       myAsset->AddRef();
@@ -703,41 +806,76 @@ void PlaylistMgr::PrepareThreadFunc(sThread *t)
 
     // ok, let's just hope any NOTCACHED asset will eventually...
     sInt nccount = 0;
-    while (myAsset->CacheStatus == Asset::NOTCACHED && nccount++<200)
+    while (myAsset->CacheStatus == Asset::NOTCACHED && (myAsset==CurRefreshing || nccount++<400))
       sSleep(5);
    
     if (myAsset->CacheStatus == Asset::CACHED)
     {
       sString<sMAXPATH> filename;
       MakeFilename(filename,myAsset->Path,AssetDir);
-      sFile *f = sCreateFile(filename);
-      sU8 *ptr = f->MapAll();
+      if (!sCheckFile(filename)) filename=myAsset->Path;
 
-      // TODO: support several asset types
-      sImage img;
-      sInt size = (sInt)f->GetSize();
-      if (img.LoadPNG(ptr,size))
+      switch (nsd->Type)
       {
-        img.PMAlpha();
-        nsd->ImgData = new sImageData(&img,sTEX_2D|sTEX_ARGB8888);
-      }
-      else
-      {
-        // if the internal image loader fails, try the Windows one
-        sImage *img2 = sLoadImageWin32(f);
-        if (img2)
+      case IMAGE: case SIEGMEISTER_BARS: case SIEGMEISTER_WINNERS:
         {
-          img2->PMAlpha();
-          nsd->ImgData = new sImageData(img2,sTEX_2D|sTEX_ARGB8888);
-          delete img2;
-        }
-        else
+          sFile *f = sCreateFile(filename);
+          if (!f)
+          {
+            nsd->Error=sTRUE;
+            return;
+          }
+          sU8 *ptr = f->MapAll();
+
+          sImage *img = new sImage();
+
+          sInt size = (sInt)f->GetSize();
+          if (img->LoadPNG(ptr,size))
+          {
+            img->PMAlpha();
+            nsd->ImgOpaque = !img->HasAlpha();
+            nsd->ImgData = new sImageData(img,sTEX_2D|sTEX_ARGB8888);
+            nsd->OrgImage = img;
+          }
+          else
+          {
+            // if the internal image loader fails, try the Windows one
+            delete img;
+            img = sLoadImageWin32(f);
+            if (img)
+            {
+              img->PMAlpha();
+              nsd->ImgOpaque = !img->HasAlpha();
+              nsd->ImgData = new sImageData(img,sTEX_2D|sTEX_ARGB8888);
+              nsd->OrgImage = img;
+            }
+            else
+            {
+              sDPrintF(L"Error loading %s\n",myAsset->Path);
+              nsd->Error = sTRUE;
+            }
+          }
+          delete f;
+        } break;
+      case VIDEO:
         {
-          sDPrintF(L"Error loading %s\n",myAsset->Path);
-          nsd->Error = sTRUE;
-        }
+          nsd->Movie = sCreateMoviePlayer(filename,sMOF_DONTSTART|(item->Mute?sMOF_NOSOUND:0));
+          if (nsd->Movie)
+          {
+            
+          }
+          else
+          {
+            nsd->Error = sTRUE;
+          }
+        } break;
       }
-      delete f;
+    }
+    else
+    {
+      LogTime();
+      sDPrintF(L"prepare: cache failed");
+      nsd->Error=sTRUE;
     }
    
 
@@ -747,6 +885,8 @@ void PlaylistMgr::PrepareThreadFunc(sThread *t)
       sDelete(PreparedSlide);
       PreparedSlide = nsd;
     }
+
+		LogTime(); sDPrintF(L"prepare done\n");
   }
 }
 
