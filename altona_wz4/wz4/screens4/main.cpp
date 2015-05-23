@@ -23,6 +23,7 @@
 #include "vorbisplayer.hpp"
 #include "network.hpp"
 #include "playlists.hpp"
+#include "webview.hpp"
 
 #include "network/netdebug.hpp"
 
@@ -124,6 +125,9 @@ static void SetupScreenMode(Config::Resolution resolution, sBool fullscreen)
   }
   */
 }
+
+/****************************************************************************/
+/****************************************************************************/
 
 /****************************************************************************/
 /****************************************************************************/
@@ -348,9 +352,10 @@ public:
     RenderList Pic, OpaquePic, Siegmeister, CustomFS;
 
     sMoviePlayer* Movie;
+    WebView* Web;
 
-    SlideEntry() : TexOp(0), Movie(0) {}
-    ~SlideEntry() { sRelease(Movie); }
+    SlideEntry() : TexOp(0), Movie(0), Web(0) {}
+    ~SlideEntry() { sRelease(Movie); sRelease(Web); }
 
   } *Entry[2];
 
@@ -364,12 +369,14 @@ public:
   sAutoPtr<Wz4Render> NextRender;
   sAutoPtr<Wz4Render> CurRender;
   sAutoPtr<Wz4Render> Main;
+  sAutoPtr<Wz4Render> Dimmer;
 
   sAutoPtr<Wz4Render> CurSlide;
   sAutoPtr<Wz4Render> NextSlide;
 
-  sF32 TransTime, TransDurMS, CurRenderTime, NextRenderTime, SlideStartTime;
+  sF32 TransTime, TransDurMS, CurRenderTime, NextRenderTime, SlideStartTime, DimTime;
   sBool Started;
+  sBool Dimmed;
 
   bMusicPlayer SoundPlayer;
 
@@ -399,6 +406,7 @@ public:
     TransTime = -1.0f;
     CurRenderTime = NextRenderTime = 0.0f;
     Started = sFALSE;
+    Dimmed = sFALSE;
     SlideStartTime = 0;
     CurId = 0;
     ImageOut = 0;
@@ -497,32 +505,32 @@ public:
     switch (ns->Type)
     {
     case IMAGE:
-      if (ns->ImgOpaque)
-      {
-        NextSlide = e->OpaquePic.GetNext(ns->RenderType);
-        if (NextSlide.IsNull())
-          NextSlide = e->Pic.GetNext(ns->RenderType);
-      }
-      else
-        NextSlide = e->Pic.GetNext(ns->RenderType);
-      break;
+        if (ns->ImgOpaque)
+        {
+            NextSlide = e->OpaquePic.GetNext(ns->RenderType);
+            if (NextSlide.IsNull())
+                NextSlide = e->Pic.GetNext(ns->RenderType);
+        }
+        else
+            NextSlide = e->Pic.GetNext(ns->RenderType);
+        break;
     case SIEGMEISTER_BARS:
     case SIEGMEISTER_WINNERS:
-      {
+    {
         NextSlide = e->Siegmeister.GetNext(ns->RenderType);
-        RNSiegmeister *node = GetNode<RNSiegmeister>(L"Siegmeister",NextSlide);
+        RNSiegmeister *node = GetNode<RNSiegmeister>(L"Siegmeister", NextSlide);
         node->DoBlink = (ns->Type == SIEGMEISTER_WINNERS);
-        node->Fade = node->DoBlink?1:0;
-        node->Alpha=ns->SiegData->BarAlpha;
-        node->Color=ns->SiegData->BarColor;
-        node->BlinkColor1=ns->SiegData->BarBlinkColor1;
-        node->BlinkColor2=ns->SiegData->BarBlinkColor2;
+        node->Fade = node->DoBlink ? 1 : 0;
+        node->Alpha = ns->SiegData->BarAlpha;
+        node->Color = ns->SiegData->BarColor;
+        node->BlinkColor1 = ns->SiegData->BarBlinkColor1;
+        node->BlinkColor2 = ns->SiegData->BarBlinkColor2;
         node->Spread = MyConfig->BarAnimSpread;
         node->Bars.Clear();
         node->Bars.Copy(ns->SiegData->BarPositions);
-      } break;
+    } break;
     case VIDEO:
-      {
+    {
         NextSlide = e->CustomFS.GetNext(ns->RenderType);
         sRelease(e->Movie);
         e->Movie = ns->Movie;
@@ -537,7 +545,20 @@ public:
 
         e->Movie->SetVolume(0);
         e->Movie->Play();
-      }
+    } break;
+    case WEB:
+    {
+        NextSlide = e->CustomFS.GetNext(ns->RenderType);
+        sRelease(e->Web);
+        e->Web = ns->Web;
+        ns->Web = 0;
+
+        RNCustomFullscreen2D *node = GetNode<RNCustomFullscreen2D>(L"Custom2DFS", NextSlide);
+        sFRect uvr;
+        node->Material = e->Web->GetFrame(uvr);
+        node->Aspect = e->Web->GetAspect();
+        node->UVRect = uvr;
+    } break;
     }
 
     sSwap(Entry[0], Entry[1]);
@@ -632,6 +653,7 @@ public:
     SetChild(Main,CurShow,0);
 
     sRelease(Entry[0]->Movie);
+    sRelease(Entry[0]->Web);
     if (Entry[1]->Movie)
       Entry[1]->Movie->SetVolume(MyConfig->MovieVolume);
 
@@ -664,6 +686,11 @@ public:
     CurRender = (Wz4Render*)Doc->CalcOp(Doc->FindStore(L"CurRender"));
     NextRender = (Wz4Render*)Doc->CalcOp(Doc->FindStore(L"NextRender"));
     Main = (Wz4Render*)Doc->CalcOp(Doc->FindStore(L"Main"));
+    Dimmer = (Wz4Render*)Doc->CalcOp(Doc->FindStore(L"Dimmer"));
+    if (Dimmer)
+    {
+        ((RNAdd*)Dimmer->RootNode)->TimeOverride = &DimTime;
+    }
 
     // load transitions
     wOp *op;
@@ -950,9 +977,23 @@ public:
       }
       PaintInfo.CamOverride = 0;
 
+      // handle dimming
+      if (Dimmed)
+      {
+        DimTime = sMin<sF32>(DimTime + tdelta / 1000.0f, 1);
+        PlMgr.Locked = MyConfig->LockWhenDimmed;
+      }
+      else
+      {
+        DimTime = sMax<sF32>(DimTime - tdelta / 1000.0f, 0);
+        PlMgr.Locked = sFALSE;
+      }
+
+      // paint!
       DoPaint(RootObj,PaintInfo);
       FramesRendered++;
 
+      // handle transitions
       if (TransTime>=0)
       {
         TransTime += tdelta/TransDurMS;
@@ -1027,6 +1068,10 @@ public:
       break;
     case Config::MIDINOTE:
       SendMidiNote(kev->ParaNote);
+      handled = sTRUE;
+      break;
+    case Config::DIM:
+      Dimmed = !Dimmed;
       handled = sTRUE;
       break;
     }
@@ -1109,6 +1154,7 @@ void sMain()
 {
   sAddSubsystem(L"StealingTaskScheduler (wz4player style)",0x80,0,sExitSts);
   sAddMidi(sTRUE, sTRUE);
+  AddWebView();
 
   sGetMemHandler(sAMF_HEAP)->MakeThreadSafe();
   sGetMemHandler(sAMF_HEAP)->IncludeInSnapshot = sTRUE;
